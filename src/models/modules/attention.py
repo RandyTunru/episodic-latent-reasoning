@@ -63,9 +63,11 @@ class MultiHeadAttention(nn.Module):
         return output
     
 class CrossAttention(nn.Module):
-    def __init__(self, d_model, num_heads):
+    def __init__(self, d_model, num_heads, shift_by_context=False):
         super(CrossAttention, self).__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+
+        self.shift_by_context = shift_by_context
         
         self.d_model = d_model
         self.num_heads = num_heads
@@ -103,7 +105,7 @@ class CrossAttention(nn.Module):
         v = self.linear_v(context).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
 
         if freqs_cis is not None:
-            q = self._apply_rope(q, freqs_cis, starts_from=context_seq_len) # Treat the input as a continuation of the context sequence
+            q = self._apply_rope(q, freqs_cis, starts_from=context_seq_len * self.shift_by_context) # Treat the input as a continuation of the context sequence, if shift_by_context is True
             k = self._apply_rope(k, freqs_cis)
 
 
