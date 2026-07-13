@@ -5,14 +5,17 @@ import torch.nn.functional as F
 from src.models.modules.block import SelfAttentionBlock, RMSNorm
 
 class Encoder(nn.Module):
-    def __init__(self, d_model, num_heads, d_ff, num_layers, dropout=0.0):
+    def __init__(self, vocab_size, d_model, num_heads, d_ff, num_layers, dropout=0.0):
         super(Encoder, self).__init__()
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+
         self.layers = nn.ModuleList([
             SelfAttentionBlock(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)
         ])
         self.norm = RMSNorm(d_model)
 
     def forward(self, x, keep_indices=None):
+        x = self.token_embedding(x)
         for layer in self.layers:
             x = layer(x, keep_indices=keep_indices)
         x = self.norm(x)

@@ -8,10 +8,8 @@ from src.models.text_jepa.modules.encoder import Encoder
 from src.models.text_jepa.modules.predictor import Predictor
 
 class TextJEPA(nn.Module):
-    def __init__(self, vocab_size, encoder_kwargs, predictor_kwargs):
+    def __init__(self, encoder_kwargs, predictor_kwargs):
         super(TextJEPA, self).__init__()
-        self.token_embedding = nn.Embedding(vocab_size, encoder_kwargs['d_model'])
-
         self.context_encoder = Encoder(**encoder_kwargs)
         self.predictor = Predictor(**predictor_kwargs)
 
@@ -35,8 +33,6 @@ class TextJEPA(nn.Module):
     
     def forward(self, x, context_indices, target_indices):
         batch_size, num_blocks, block_size = target_indices.shape
-
-        x = self.token_embedding(x)  # (B, seq_length, d_model)
 
         # Context branch: only the context patches through the context encoder.
         context_repr = self.context_encoder(x, keep_indices=context_indices)
