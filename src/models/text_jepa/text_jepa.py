@@ -8,8 +8,10 @@ from src.models.text_jepa.modules.encoder import Encoder
 from src.models.text_jepa.modules.predictor import Predictor
 
 class TextJEPA(nn.Module):
-    def __init__(self, encoder_kwargs, predictor_kwargs):
+    def __init__(self, vocab_size, encoder_kwargs, predictor_kwargs):
         super(TextJEPA, self).__init__()
+        self.token_embedding = nn.Embedding(vocab_size, encoder_kwargs['d_model'])
+
         self.context_encoder = Encoder(**encoder_kwargs)
         self.predictor = Predictor(**predictor_kwargs)
 
@@ -32,4 +34,27 @@ class TextJEPA(nn.Module):
         return self
     
     def forward(self, x, context_indices, target_indices):
-        pass
+        batch_size, num_blocks, block_size = target_indices.shape
+
+        x = self.token_embedding(x)  # (B, seq_length, d_model)
+
+        # Context branch: only the context patches through the context encoder.
+        context_repr = self.context_encoder(x, keep_indices=context_indices)
+
+        # Target branch: full sequence through the EMA encoder, no gradients.
+        with torch.no_grad():
+            target_full = self.target_encoder(x)  # (B, num_patches, encoder_dim)
+
+            flat_indices = target_indices.reshape(batch_size, num_blocks * block_size)
+            expanded = flat_indices.unsqueeze(-1).expand(-1, -1, target_full.size(-1))
+            targets = torch.gather(target_full, dim=1, index=expanded)
+            targets = targets.view(batch_size, num_blocks, block_size, -1)
+
+        # Predictor branch: extends the context representation to predict the target patches.
+        predictions = self.predictor(context_repr, context_indices, target_indices)
+        return predictions, targets
+    
+    @torch.no_grad()
+    def update_target_encoder(self, momentum=0.999):
+        for p_ctx, p_tgt in zip(self.context_encoder.parameters(),self.target_encoder.parameters()):
+            p_tgt.data.mul_(momentum).add_(p_ctx.data, alpha=1.0 - momentum)
