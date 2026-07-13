@@ -87,6 +87,8 @@ class CrossAttention(Attention):
         self.rope_on_context = rope_on_context  # New parameter to control whether to apply RoPE to the context
 
     def forward(self, x, context, freqs_cis=None):
+        assert not ((self.shift_by_context or self.rope_on_context) and (freqs_cis is None)), "freqs_cis should be provided if either shift_by_context or rope_on_context is True"
+
         batch_size = x.size(0)
 
         context_seq_len = context.size(1)
