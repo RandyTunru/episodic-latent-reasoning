@@ -14,10 +14,13 @@ class Predictor(nn.Module):
         self.norm = RMSNorm(predictor_dim)
         self.up_projection = nn.Linear(predictor_dim, encoder_dim)
 
-    def forward(self, x, keep_indices=None):
+    def forward(self, x, freqs_cis=None, keep_indices=None):
         x = self.down_projection(x)
+
+        # keep_indices should be implemented here
+
         for layer in self.layers:
-            x = layer(x, keep_indices=keep_indices)
+            x = layer(x, mask=None, freqs_cis=freqs_cis)
         x = self.norm(x)
         x = self.up_projection(x)
         return x

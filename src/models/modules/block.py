@@ -24,8 +24,8 @@ class SelfAttentionBlock(nn.Module):
         self.norm2 = RMSNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        attn_output = self.attention(self.norm1(x))
+    def forward(self, x, mask= None, freqs_cis=None):
+        attn_output = self.attention(self.norm1(x), mask=mask, freqs_cis=freqs_cis)
         x = x + self.dropout(attn_output)
 
         ffn_output = self.ffn(self.norm2(x))
@@ -44,8 +44,8 @@ class CrossAttentionBlock(nn.Module):
         self.norm3 = RMSNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, context):
-        self_attn_output = self.self_attention(self.norm1(x))
+    def forward(self, x, context, mask=None, freqs_cis=None):
+        self_attn_output = self.self_attention(self.norm1(x), mask=mask, freqs_cis=freqs_cis)
         x = x + self.dropout(self_attn_output)
 
         cross_attn_output = self.cross_attention(self.norm2(x), context)

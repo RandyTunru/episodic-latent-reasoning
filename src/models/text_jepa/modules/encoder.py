@@ -14,9 +14,12 @@ class Encoder(nn.Module):
         ])
         self.norm = RMSNorm(d_model)
 
-    def forward(self, x, keep_indices=None):
+    def forward(self, x, freqs_cis=None, keep_indices=None):
         x = self.token_embedding(x)
+
+        # keep_indices should be implemented here
+
         for layer in self.layers:
-            x = layer(x, keep_indices=keep_indices)
+            x = layer(x, mask=None, freqs_cis=freqs_cis)
         x = self.norm(x)
         return x
