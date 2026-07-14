@@ -11,7 +11,14 @@ class RJEPA(nn.Module):
     def __init__(self, encoder_kwargs, predictor_kwargs, is_cross_attention=True):
         super(RJEPA, self).__init__()
         self.context_encoder = Encoder(**encoder_kwargs)
-        self.predictor = CrossAttentionPredictor(**predictor_kwargs) if is_cross_attention else CausalAttentionPredictor(**predictor_kwargs)
+        if is_cross_attention:
+            self.predictor = CrossAttentionPredictor(**predictor_kwargs)
+        else:
+            # Adjust max_seq_length for causal attention
+            # Since in the predictor it will be predicting the reasoning tokens with the context tokens prepended
+            # We need to account for the context length in the predictor's max_seq_length
+            predictor_kwargs['max_seq_length'] = encoder_kwargs['max_seq_length'] + predictor_kwargs['max_seq_length']  
+            self.predictor = CausalAttentionPredictor(**predictor_kwargs)
 
         for param in self.context_encoder.parameters():
             param.requires_grad = False  # Ensure context encoder parameters are frozen
