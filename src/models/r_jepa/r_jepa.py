@@ -56,6 +56,7 @@ class RJEPA(nn.Module):
 
         return predictions, target_repr, router_logits
 
+    @torch.no_grad()
     def infer(self, x):
         # Context branch: process the input through the context encoder to get context representations.
         context_repr = self.context_encoder(x)  # (1, seq_length, encoder_dim)
