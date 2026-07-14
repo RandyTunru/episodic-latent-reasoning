@@ -5,13 +5,13 @@ from torch import nn
 from torch.nn import functional as F
 
 from src.models.text_jepa.modules.encoder import Encoder # We use the same encoder from text_jepa for the context and target encoders.
-from src.models.r_jepa.modules.predictor import CrossAttentionPredictor
+from src.models.r_jepa.modules.predictor import CrossAttentionPredictor, CausalAttentionPredictor
 
 class RJEPA(nn.Module):
-    def __init__(self, encoder_kwargs, predictor_kwargs):
+    def __init__(self, encoder_kwargs, predictor_kwargs, is_cross_attention=True):
         super(RJEPA, self).__init__()
         self.context_encoder = Encoder(**encoder_kwargs)
-        self.predictor = CrossAttentionPredictor(**predictor_kwargs)
+        self.predictor = CrossAttentionPredictor(**predictor_kwargs) if is_cross_attention else CausalAttentionPredictor(**predictor_kwargs)
 
         for param in self.context_encoder.parameters():
             param.requires_grad = False  # Ensure context encoder parameters are frozen
