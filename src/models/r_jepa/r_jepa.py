@@ -16,7 +16,7 @@ class RJEPA(nn.Module):
         for param in self.context_encoder.parameters():
             param.requires_grad = False  # Ensure context encoder parameters are frozen
 
-        self.target_encoder = copy.deepcopy(self.context_encoder) # Since the target encoder is a deepcopy, it will also have frozen parameters.
+        # self.target_encoder = copy.deepcopy(self.context_encoder) # Since the target encoder is a deepcopy, it will also have frozen parameters.
 
         # RoPE Frequencies 
         head_dim = self.d_model // self.num_heads
@@ -43,7 +43,7 @@ class RJEPA(nn.Module):
     def train(self, mode=True):
         super().train(mode)
         self.context_encoder.eval()
-        self.target_encoder.eval()
+        # self.target_encoder.eval()
         return self
     
     def forward(self, x, reasoning_steps):
@@ -53,12 +53,16 @@ class RJEPA(nn.Module):
         # Target branch: process the reasoning steps through the target encoder to get target representations.
         with torch.no_grad():
             # Reasoning steps is size (B, reasoning_steps, seq_length, d_model)
-            target_repr = self.target_encoder(reasoning_steps)  # (B, reasoning_steps, encoder_dim)
+            # target_repr = self.target_encoder(reasoning_steps)  # (B, reasoning_steps, seq_length, d_model)
+
+            # Since target and context encoders are the same, we can use the context encoder to encode the reasoning steps as well.
+            target_repr = self.context_encoder(reasoning_steps)  # (B, reasoning_steps, seq_length, d_model)
+            target_repr = target_repr.mean(dim=2)  # (B, reasoning_steps, d_model)
 
         # Predictor branch: use the context representations to predict the target representations.
         # This is an autoregressive prediction, so we feed in the context and the previous predictions to predict the next step.
         predictions = self.predictor(
-            x=reasoning_steps[:, :-1, :], 
+            x=target_repr[:, :-1, :], 
             context=context_repr, 
             mask=self.mask, 
             freqs_cis=self.freqs_cis
