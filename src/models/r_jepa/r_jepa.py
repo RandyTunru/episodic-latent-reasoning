@@ -49,9 +49,9 @@ class RJEPA(nn.Module):
 
         # Predictor branch: use the context representations to predict the target representations.
         # This is an autoregressive prediction, so we feed in the context and the previous predictions to predict the next step.
-        predictions = self.predictor(
+        predictions, router_logits = self.predictor(
             x=target_repr[:, :-1, :], 
             context=context_repr
         )  # (B, reasoning_steps, encoder_dim)
 
-        return predictions, target_repr
+        return predictions, target_repr, router_logits

@@ -16,6 +16,8 @@ class RJEPAPredictor(nn.Module, ABC):
         self.norm = RMSNorm(predictor_dim)
         self.up_projection = nn.Linear(predictor_dim, encoder_dim)
 
+        self.router = nn.Linear(predictor_dim, 1)  # A simple linear layer to produce a scalar score for each reasoning step.
+
         # RoPE Frequencies 
         head_dim = predictor_dim // num_heads
         freqs = torch.arange(0, head_dim, 2) / head_dim
@@ -56,8 +58,11 @@ class CrossAttentionPredictor(RJEPAPredictor):
             x = layer(x, context=context, mask=self.mask, freqs_cis=self.freqs_cis)
         x = self.norm(x)
 
+        # Use the router to score each reasoning step.
+        router_logits = self.router(x).squeeze(-1)  # (B, reasoning_steps)
+
         x = self.up_projection(x)
-        return x
+        return x, router_logits  # Return both the predictions and the router scores
 
 class CausalAttentionPredictor(RJEPAPredictor):
     def __init__(self, encoder_dim, predictor_dim, num_heads, d_ff, num_layers, max_seq_length, dropout=0.0):
@@ -80,8 +85,11 @@ class CausalAttentionPredictor(RJEPAPredictor):
             x = layer(x, mask=self.mask, freqs_cis=self.freqs_cis)  
         x = self.norm(x)
 
+        # Use the router to score each reasoning step.
+        router_logits = self.router(x).squeeze(-1)  # (B, reasoning_steps)
+
         x = self.up_projection(x)
         # Return only the predictions corresponding to the reasoning steps
         # start with context_len because slicing is inclusive of the start index, 
         # context_len would be the index of the output corresponding the start_token, which is our first reasoning step.
-        return x[:, context_len:, :]  
+        return x[:, context_len:, :], router_logits  
