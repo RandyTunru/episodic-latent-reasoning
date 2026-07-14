@@ -52,6 +52,27 @@ class RJEPA(nn.Module):
         predictions, router_logits = self.predictor(
             x=target_repr[:, :-1, :], 
             context=context_repr
-        )  # (B, reasoning_steps, encoder_dim)
+        )  # (B, reasoning_steps, encoder_dim) for predictions and (B, reasoning_steps) for router_logits
 
         return predictions, target_repr, router_logits
+
+    def infer(self, x):
+        # Context branch: process the input through the context encoder to get context representations.
+        context_repr = self.context_encoder(x)  # (1, seq_length, encoder_dim)
+
+        reasoning_steps = torch.empty((x.size(0), 0, context_repr.size(-1)), device=x.device)  # Initialize empty reasoning steps
+        while True:
+            # Predictor branch: use the context representations to predict the next reasoning step.
+            predictions, router_logits = self.predictor(
+                x=reasoning_steps,
+                context=context_repr
+            )  # (1, reasoning_steps, encoder_dim) for predictions and (1, reasoning_steps) for router_logits
+
+            # Append the new prediction to the context representation for the next iteration
+            reasoning_steps = torch.cat([reasoning_steps, predictions[:, -1:, :]], dim=1)  # Append the last prediction
+
+            # Check the router logits to decide whether to continue or stop
+            if router_logits[:, -1] < 0:  # If the last router logit is negative, we stop
+                break
+
+        return reasoning_steps
