@@ -53,12 +53,12 @@ class RJEPA(nn.Module):
         return predictions, target_repr, router_logits
 
     @torch.no_grad()
-    def infer(self, x):
+    def infer(self, x, max_steps=256):
         # Context branch: process the input through the context encoder to get context representations.
         context_repr = self.context_encoder(x)  # (1, seq_length, encoder_dim)
 
         reasoning_steps = torch.empty((x.size(0), 0, context_repr.size(-1)), device=x.device)  # Initialize empty reasoning steps
-        while True:
+        for _ in range(max_steps):
             # Predictor branch: use the context representations to predict the next reasoning step.
             predictions, router_logits = self.predictor(
                 x=reasoning_steps,
