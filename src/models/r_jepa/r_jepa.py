@@ -4,13 +4,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from src.models.text_jepa.modules.encoder import Encoder # We use the same encoder from text_jepa for the context and target encoders.
+from transformers import AutoConfig, AutoModel
 from src.models.r_jepa.modules.predictor import CrossAttentionPredictor, CausalAttentionPredictor
 
 class RJEPA(nn.Module):
     def __init__(self, encoder_kwargs, predictor_kwargs, is_cross_attention=True):
         super(RJEPA, self).__init__()
-        self.context_encoder = Encoder(**encoder_kwargs)
+        self.context_encoder = AutoModel.from_config(AutoConfig.from_pretrained(encoder_kwargs['model_name']))
         if is_cross_attention:
             self.predictor = CrossAttentionPredictor(**predictor_kwargs)
         else:
