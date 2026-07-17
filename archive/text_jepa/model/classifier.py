@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from src.models.text_jepa.modules.encoder import Encoder
+from archive.text_jepa.model.modules.encoder import Encoder
 
 class TextJEPAClassifier(nn.Module):
     def __init__(self, encoder_kwargs, num_classes):
