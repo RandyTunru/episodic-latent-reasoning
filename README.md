@@ -80,8 +80,7 @@ episodic-latent-reasoning/
 │   │       └── r_jepa_trainer.py    # Training loop (AMP, grad accum, cosine LR, checkpointing)
 │   └── utils/
 │       ├── metrics.py               #   ThroughputMonitor, param counting
-│       ├── performance.py           #   F1 score, accuracy
-│       └── masking.py               #   MultiBlockMasking (I-JEPA-style image masking)
+│       └── performance.py           #   F1 score, accuracy
 └── project.txt                      # Project premise and motivation
 ```
 
