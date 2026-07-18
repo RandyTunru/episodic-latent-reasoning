@@ -34,28 +34,66 @@ class RJEPA(nn.Module):
 
     def __init__(
         self,
-        encoder_kwargs: dict,
         predictor_kwargs: dict,
         is_cross_attention: bool = True,
+        encoder: Optional[nn.Module] = None,
+        encoder_kwargs: Optional[dict] = None,
+        encoder_max_seq_length: Optional[int] = None,
     ):
         """Initialise the R-JEPA model.
 
+        The encoder can be provided in one of two ways:
+
+        1. **Pre-built** - pass ``encoder=`` with any model that accepts
+           ``(input_ids, attention_mask)`` and returns
+           ``(B, seq_len, d_model)``.  Use this to swap in a pretrained
+           HuggingFace model or your own checkpoint.
+        2. **Construct from kwargs** - pass ``encoder_kwargs=`` to build
+           the custom Transformer encoder internally.  This is the
+           showcase path; it keeps the tensor math explicit.
+
+        If neither is provided (or both are provided), an error is raised.
+
+        When passing a pre-built encoder, you must also provide
+        ``encoder_max_seq_length`` so the causal-attention predictor can
+        size its position buffers correctly.
+
         Args:
-            encoder_kwargs: Keyword arguments for constructing the frozen encoder.
-            predictor_kwargs: Keyword arguments for constructing the predictor.
-            is_cross_attention: Whether to use cross-attention in the predictor.
             predictor_kwargs: Keyword arguments forwarded to the predictor
-                constructor (``encoder_dim``, ``predictor_dim``,
-                ``num_heads``, ``d_ff``, ``num_layers``, ``max_seq_length``,
-                ``dropout``).
-            encoder_max_seq_length: Maximum token sequence length the encoder
-                can handle (used to size causal-attention predictor buffers).
-            is_cross_attention: Use ``CrossAttentionPredictor`` when ``True``,
-                ``CausalAttentionPredictor`` when ``False``.
+                (``encoder_dim``, ``predictor_dim``, ``num_heads``,
+                ``d_ff``, ``num_layers``, ``max_seq_length``, ``dropout``).
+            is_cross_attention: ``True`` → :class:`CrossAttentionPredictor`,
+                ``False`` → :class:`CausalAttentionPredictor`.
+            encoder: A pre-built encoder module.  Must accept
+                ``(input_ids, attention_mask) → (B, seq_len, d_model)``.
+            encoder_kwargs: Keyword arguments forwarded to :class:`Encoder`
+                (``vocab_size``, ``d_model``, ``num_heads``, ``d_ff``,
+                ``num_layers``, ``max_seq_length``, ``dropout``).  Ignored
+                when ``encoder`` is provided.
+            encoder_max_seq_length: Maximum token sequence length the
+                encoder can handle.  Required when passing a pre-built
+                encoder; inferred from ``encoder_kwargs`` otherwise.
         """
         super(RJEPA, self).__init__()
-        self.encoder = Encoder(**encoder_kwargs)
 
+        # Encoder: accept pre-built OR construct from kwargs.
+        if encoder is not None:
+            self.encoder = encoder
+            if encoder_max_seq_length is None:
+                raise ValueError(
+                    "encoder_max_seq_length is required when passing a "
+                    "pre-built encoder (needed to size causal predictor buffers)"
+                )
+            enc_max_len = encoder_max_seq_length
+        elif encoder_kwargs is not None:
+            self.encoder = Encoder(**encoder_kwargs)
+            enc_max_len = encoder_kwargs["max_seq_length"]
+        else:
+            raise ValueError(
+                "Either encoder= or encoder_kwargs= must be provided"
+            )
+
+        # Predictor construction.
         if is_cross_attention:
             self.predictor = CrossAttentionPredictor(**predictor_kwargs)
         else:
@@ -63,9 +101,9 @@ class RJEPA(nn.Module):
             # Its max_seq_length must cover the full window.
             predictor_kwargs = {**predictor_kwargs}
             predictor_kwargs["max_seq_length"] = (
-                encoder_kwargs["max_seq_length"]
+                enc_max_len
                 + predictor_kwargs["max_seq_length"]
-                + 1
+                + 1  # +1 for the learnable start_token
             )
             self.predictor = CausalAttentionPredictor(**predictor_kwargs)
 
