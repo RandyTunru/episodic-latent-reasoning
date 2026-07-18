@@ -62,11 +62,11 @@ this contract can be plugged into R-JEPA.
 | Path | Description | When to use |
 |------|-------------|-------------|
 | **Custom from-scratch** | `src/models/modules/encoder.py` - a SwiGLU + RoPE + RMSNorm Transformer with bidirectional self-attention. Ships with the codebase for clarity | Prototyping and understanding the tensor math without HuggingFace internals |
-| **Pretrained model** | Any HuggingFace `AutoModel` (BERT, Gemma, Llama, etc.), frozen and passed via `encoder=` | Production experiments - meaningful representations from day one |
-| **Pretrain then use** | Pretrain the custom encoder first (e.g. via MLM or I-JEPA span masking), then freeze and use in R-JEPA | Full-stack research where architectural control matters |
+| **Pretrained model** | Any HuggingFace `AutoModel` (BERT, Gemma, Llama, etc.), frozen and passed via `encoder=` | Production experiments - meaningful representations from the start for R-JEPA, without needing to conduct pretraining for the encoder|
+| **Pretrain then use** | Pretrain the custom encoder first (e.g. via MLM or I-JEPA span masking), then freeze and use in R-JEPA | Full-stack research where architectural control matters, have more time and compute |
 
 The custom encoder exists so that every tensor operation in the pipeline is
-explicit and auditable - it's a teaching tool as much as a practical one.
+explicit and auditable - it's an audit tool as much as a practical one.
 See [src/models/r_jepa/README.md §Encoder](src/models/r_jepa/README.md) for
 swap instructions.
 
