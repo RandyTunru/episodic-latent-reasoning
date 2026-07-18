@@ -1,7 +1,35 @@
+"""Transformer encoder - a showcase implementation, not a required component.
+
+This is a decoder-style embedding Transformer with RoPE, RMSNorm, and SwiGLU
+FFN.  It uses **bidirectional** self-attention (no causal mask), making it
+similar to a BERT encoder rather than a GPT decoder.
+
+This file exists for the following reasons:
+
+1. **Audit tool** - every tensor operation is explicit and auditable.
+   You can trace from token IDs → embeddings → attention → output without
+   wading through HuggingFace's ``modeling_*.py`` files.
+
+2. **Prototyping** - you can verify the full R-JEPA pipeline (dataset →
+   forward → loss → backward) without downloading gigabytes of pretrained
+   weights.  The encoder runs with random weights and the predictor still
+   trains - the latent states won't be *meaningful*, but the tensor math
+   is fully exercisable.
+
+3. **Research** - if you think this architecture (SwiGLU +
+   RoPE + RMSNorm + bidirectional attention) has advantages over off-the-
+   shelf encoders for reasoning tasks, this is the place to pretrain it
+   (e.g. via MLM) before freezing it for R-JEPA. Simply make a model that 
+   Extends this with a linear head and train it.
+
+For actual experiments of the RJEPA, I decided to swap in a pretrained HuggingFace model via
+``RJEPA(encoder=my_pretrained_model, ...)``.  See
+``src/models/r_jepa/README.md`` §Encoder for the full swap guide.
+"""
+
 from typing import Optional
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from src.models.modules.block import SelfAttentionBlock, RMSNorm
 

@@ -24,6 +24,7 @@ sub-quadratic inference without sacrificing logical depth.
 
 | Decision | Rationale |
 |----------|-----------|
+| Encoder is swappable | The codebase ships a custom Transformer encoder for clarity, but the interface accepts any model that maps `(input_ids, attention_mask) → (B, seq, d_model)`. Swap in a pretrained HuggingFace model or your own pretrained encoder without touching the predictor |
 | Frozen encoder (no EMA target) | Follows V-JEPA2 action-conditioned phase; both context and target encoders are identical frozen copies |
 | Padding over packing (v1) | Simpler to implement and debug; upgrade to FlashAttention varlen when padding waste exceeds 30% |
 | Router trained via position pseudo-labels | Intermediate steps = 1 (continue), last step = 0 (halt); no external labels needed |
@@ -57,10 +58,43 @@ sub-quadratic inference without sacrificing logical depth.
 
 | Component | Description | Trainable |
 |-----------|-------------|-----------|
-| `Encoder` | Custom Transformer with token embeddings, RoPE, RMSNorm, SwiGLU FFN | Frozen |
+| `Encoder` | Any model mapping `(input_ids, attention_mask) → (B, seq, d_model)`. Ships with a custom Transformer; swappable with HuggingFace AutoModel or a pretrained checkpoint | Frozen |
 | `Predictor` | Autoregressive latent-state forecaster (cross-attention or causal) | ✓ |
 | `Router` | Linear layer scoring each predicted state for halting | ✓ |
 | `start_token` | Learnable parameter seeding the autoregressive chain | ✓ |
+
+#### Encoder: Swap Explanation
+
+The encoder interface is minimal - `(input_ids, attention_mask) → (B, seq_len, d_model)`.  Anything that satisfies
+this contract works.  Three paths are available depending on the stage of the project:
+
+| Path | What | When |
+|------|------|------|
+| **A. Custom from-scratch (current default)** | `src/models/modules/encoder.py` - a decoder-style Transformer with RoPE, RMSNorm, SwiGLU FFN, and bidirectional self-attention | **Showcase / prototyping.**  Keeps the tensor math explicit and avoids coupling to HuggingFace internals.  No pretrained weights - the encoder is frozen with random weights, which is fine for verifying the predictor design but won't produce meaningful latent states |
+| **B. Pretrained HuggingFace model** | Swap in any `AutoModel` (e.g. BERT, Llama, Gemma) by constructing it externally and passing it as the `encoder` kwarg.  The model must be frozen before being wrapped by `RJEPA` | **Production.**  A pretrained encoder provides meaningful semantic representations from day one.  The predictor learns to forecast transitions between these representations.  This is the recommended path for real experiments |
+| **C. Pretrain the custom encoder first** | Train the custom encoder using the I-JEPA word-bounded span masking approach (see `archive/text_jepa/`) or standard MLM, then freeze and use in R-JEPA | **Full-stack research.**  Justified if you believe the architecture (SwiGLU + RoPE + RMSNorm + bidirectional attention) is a better fit for reasoning than off-the-shelf encoders.  Requires a separate pretraining phase |
+
+**How to swap the encoder:**
+
+```python
+from transformers import AutoModel, AutoConfig
+from src.models.r_jepa import RJEPA
+
+# Option B: load a pretrained encoder
+config = AutoConfig.from_pretrained("google/gemma-2-2b")
+config.output_hidden_states = False
+pretrained = AutoModel.from_config(config)  # or .from_pretrained(...)
+
+model = RJEPA(
+    encoder=pretrained,  # pass the pre-built encoder directly
+    encoder_max_seq_length=2048
+    predictor_kwargs=dict(...),
+)
+```
+
+The `RJEPA` constructor accepts either a pre-built encoder (`encoder=`) or kwargs to construct the custom one
+(`encoder_kwargs=`).  The custom encoder exists so you can read the code and understand every tensor operation
+without wading through HuggingFace's `modeling_*.py` - it is an audit tool as much as a practical one.
 
 ### Predictor Variants
 
