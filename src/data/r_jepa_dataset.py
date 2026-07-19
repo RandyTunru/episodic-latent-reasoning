@@ -4,7 +4,7 @@ Handles datasets where each example has an "instruction" and a "response"
 field.  The response typically contains chain-of-thought reasoning wrapped in
 think tokens (e.g. "<think>...</think>") followed by the final answer.
 This dataset extracts the CoT portion, splits it into reasoning steps, and
-tokenises each step individually for the R-JEPA target encoder.
+tokenizes each step individually for the R-JEPA target encoder.
 """
 
 import re
@@ -14,12 +14,12 @@ from torch.utils.data import Dataset
 
 
 class ReasoningDataset(Dataset):
-    """Tokenises instructions and per-step reasoning chains.
+    """tokenizes instructions and per-step reasoning chains.
 
     Designed for instruction-response datasets where the response mixes a
     chain-of-thought block (delimited by think tokens) with a final answer.
     The CoT block is extracted, split into reasoning steps, and each step is
-    tokenised independently.  The final answer is *not* used during R-JEPA
+    tokenized independently.  The final answer is *not* used during R-JEPA
     pretraining - the predictor learns solely from the latent dynamics of the
     reasoning chain.
 
@@ -75,8 +75,8 @@ class ReasoningDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
-    def _tokenise(self, text: str, max_length: int):
-        """Tokenise a single text, truncating to *max_length*."""
+    def _tokenize(self, text: str, max_length: int):
+        """tokenize a single text, truncating to *max_length*."""
         out = self.tokenizer(
             text,
             truncation=True,
@@ -135,11 +135,11 @@ class ReasoningDataset(Dataset):
         # dynamics, not answer generation.
         cot_text = self._extract_cot(response)
 
-        # Tokenise instruction.
-        ctx_ids, ctx_mask = self._tokenise(instruction, self.max_ctx_length)
+        # tokenize instruction.
+        ctx_ids, ctx_mask = self._tokenize(instruction, self.max_ctx_length)
 
-        # Parse and tokenise reasoning steps.
-        # Each step is tokenised independently so that the target encoder
+        # Parse and tokenize reasoning steps.
+        # Each step is tokenized independently so that the target encoder
         # can mean-pool each step into a single latent representation.
         if cot_text:
             steps = self._parse_steps(cot_text)
@@ -147,7 +147,7 @@ class ReasoningDataset(Dataset):
             steps = []
         step_ids, step_masks = [], []
         for step in steps:
-            ids, mask = self._tokenise(step, self.max_step_length)
+            ids, mask = self._tokenize(step, self.max_step_length)
             step_ids.append(ids)
             step_masks.append(mask)
 
