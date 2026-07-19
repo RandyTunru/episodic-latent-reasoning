@@ -53,7 +53,7 @@ class Encoder(nn.Module):
             SelfAttentionBlock(d_model, num_heads, d_ff, dropout)
             for _ in range(num_layers)
         ])
-        self.norm = RMSNorm(d_model)
+        self.norm = nn.LayerNorm(d_model)
 
         # Precompute RoPE frequencies up to max_seq_length.
         head_dim = d_model // num_heads
