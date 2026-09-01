@@ -12,7 +12,7 @@ from typing import Optional
 import torch
 from torch import nn
 
-from src.models.modules.encoder import Encoder
+from src.models.r_jepa.modules.encoder import Encoder
 from src.models.r_jepa.modules.predictor import (
     CrossAttentionPredictor,
     CausalAttentionPredictor,
@@ -28,17 +28,22 @@ class RJEPA(nn.Module):
        starting from a learnable ``<start>`` token, with a router that
        dynamically halts the chain once the logic has converged.
 
-    The target representations are produced by mean-pooling each reasoning
-    step's token embeddings through the same frozen encoder.
+    The target representations are produced by pooling each reasoning step's
+    token embeddings through the same frozen encoder.  The pooling mode is
+    set by ``encoder_pooling`` (``"mean"``, ``"cls"``, or ``"eos"``) and
+    should match the encoder family: ``"mean"`` for bidirectional encoders,
+    ``"eos"`` for decoder-only backbones, ``"cls"`` for tokenizers that
+    prepend a CLS/BOS token.
     """
 
     def __init__(
         self,
         predictor_kwargs: dict,
-        is_cross_attention: bool = True,
+        cross_attention: bool = True,
         encoder: Optional[nn.Module] = None,
         encoder_kwargs: Optional[dict] = None,
         encoder_max_seq_length: Optional[int] = None,
+        encoder_pooling: str = "mean",
     ):
         """Initialise the R-JEPA model.
 
@@ -62,7 +67,7 @@ class RJEPA(nn.Module):
             predictor_kwargs: Keyword arguments forwarded to the predictor
                 (``encoder_dim``, ``predictor_dim``, ``num_heads``,
                 ``d_ff``, ``num_layers``, ``max_seq_length``, ``dropout``).
-            is_cross_attention: ``True`` → :class:`CrossAttentionPredictor`,
+            cross_attention: ``True`` → :class:`CrossAttentionPredictor`,
                 ``False`` → :class:`CausalAttentionPredictor`.
             encoder: A pre-built encoder module.  Must accept
                 ``(input_ids, attention_mask) → (B, seq_len, d_model)``.
@@ -73,8 +78,20 @@ class RJEPA(nn.Module):
             encoder_max_seq_length: Maximum token sequence length the
                 encoder can handle.  Required when passing a pre-built
                 encoder; inferred from ``encoder_kwargs`` otherwise.
+            encoder_pooling: Pooling method for the per-step target
+                representations: ``"mean"`` (default, mask-weighted mean of
+                valid tokens), ``"cls"`` (first token, for tokenizers that
+                prepend CLS/BOS), or ``"eos"`` (last valid token, for
+                decoder-only backbones).
         """
         super(RJEPA, self).__init__()
+
+        if encoder_pooling not in ["mean", "cls", "eos"]:
+            raise ValueError(
+                f"Invalid pooling method '{encoder_pooling}'. Must be one of "
+                "'mean', 'cls', or 'eos'."
+            )
+        self.encoder_pooling = encoder_pooling
 
         # Encoder: accept pre-built OR construct from kwargs.
         if encoder is not None:
@@ -84,24 +101,24 @@ class RJEPA(nn.Module):
                     "encoder_max_seq_length is required when passing a "
                     "pre-built encoder (needed to size causal predictor buffers)"
                 )
-            enc_max_len = encoder_max_seq_length
+            self.enc_max_len = encoder_max_seq_length
         elif encoder_kwargs is not None:
             self.encoder = Encoder(**encoder_kwargs)
-            enc_max_len = encoder_kwargs["max_seq_length"]
+            self.enc_max_len = encoder_kwargs["max_seq_length"]
         else:
             raise ValueError(
                 "Either encoder= or encoder_kwargs= must be provided"
             )
 
         # Predictor construction.
-        if is_cross_attention:
+        if cross_attention:
             self.predictor = CrossAttentionPredictor(**predictor_kwargs)
         else:
             # Causal predictor concatenates [context, start_token, steps].
             # Its max_seq_length must cover the full window.
             predictor_kwargs = {**predictor_kwargs}
             predictor_kwargs["max_seq_length"] = (
-                enc_max_len
+                self.enc_max_len
                 + predictor_kwargs["max_seq_length"]
                 + 1  # +1 for the learnable start_token
             )
@@ -118,6 +135,38 @@ class RJEPA(nn.Module):
         super().train(mode)
         self.encoder.eval()
         return self
+
+    def _pool(self, encoder_output: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
+        """Pool the encoder output according to ``self.encoder_pooling``.
+
+        Args:
+            encoder_output: ``(B, seq_len, d_model)`` tensor from the encoder.
+            attention_mask: ``(B, seq_len)`` bool mask, ``True`` = valid token.
+                Required for 'mean' and 'eos' pooling; ignored by 'cls'.
+
+        Returns:
+            Pooled representation: ``(B, d_model)``
+        """
+        if self.encoder_pooling == 'mean':
+            if attention_mask is None:
+                raise ValueError("attention_mask is required for mean pooling")
+            valid_counts = attention_mask.sum(dim=-1, keepdim=True).clamp(min=1)
+            pooled_output = (encoder_output * attention_mask.unsqueeze(-1)).sum(dim=1) / valid_counts
+        elif self.encoder_pooling == 'cls':
+            pooled_output = encoder_output[:, 0, :]  # First token (CLS/BOS)
+        elif self.encoder_pooling == 'eos':
+            if attention_mask is None:
+                raise ValueError("attention_mask is required for eos pooling")
+            # Last valid (non-padding) token; clamp so fully-padded rows
+            # index position 0 instead of -1.
+            valid_counts = attention_mask.sum(dim=-1).clamp(min=1)
+            pooled_output = encoder_output[
+                torch.arange(encoder_output.size(0)), valid_counts - 1
+            ]
+        else:
+            raise ValueError(f"Unsupported pooling method: {self.encoder_pooling}")
+
+        return pooled_output
 
     def forward(
         self,
@@ -142,8 +191,9 @@ class RJEPA(nn.Module):
 
             * **predictions**: ``(B, max_steps, encoder_dim)`` - autoregressive
               latent-state predictions (position 0 is the start-token output).
-            * **target_repr**: ``(B, max_steps, encoder_dim)`` - mean-pooled
-              target representations for every reasoning step.
+            * **target_repr**: ``(B, max_steps, encoder_dim)`` - pooled
+              target representations for every reasoning step (mode set by
+              ``encoder_pooling``).
             * **router_logits**: ``(B, max_steps)`` - raw halting scores
               (one per predicted position).
             * **step_valid_mask**: ``(B, max_steps)`` bool, ``True`` = this
@@ -166,11 +216,9 @@ class RJEPA(nn.Module):
             target_repr = self.encoder(flat_ids, attention_mask=flat_mask)
             # (B·S, L, encoder_dim)
 
-            # Mask-weighted mean pool (exclude padding tokens).
-            valid_counts = flat_mask.sum(dim=-1, keepdim=True).clamp(min=1)
-            target_repr = (
-                target_repr * flat_mask.unsqueeze(-1)
-            ).sum(dim=1) / valid_counts  # (B·S, encoder_dim)
+            # Pool each step's token embeddings into a single vector.
+            target_repr = self._pool(target_repr, attention_mask=flat_mask)
+            # (B·S, encoder_dim)
 
             target_repr = target_repr.reshape(B, S, -1)
             # (B, max_steps, encoder_dim)
