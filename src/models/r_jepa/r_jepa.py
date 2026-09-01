@@ -12,7 +12,6 @@ from typing import Optional
 import torch
 from torch import nn
 
-from src.models.r_jepa.modules.encoder import Encoder
 from src.models.r_jepa.modules.predictor import (
     CrossAttentionPredictor,
     CausalAttentionPredictor,
@@ -41,7 +40,7 @@ class RJEPA(nn.Module):
         predictor_kwargs: dict,
         cross_attention: bool = True,
         encoder: Optional[nn.Module] = None,
-        encoder_kwargs: Optional[dict] = None,
+        # encoder_kwargs: Optional[dict] = None,
         encoder_max_seq_length: Optional[int] = None,
         encoder_pooling: str = "mean",
     ):
@@ -102,9 +101,9 @@ class RJEPA(nn.Module):
                     "pre-built encoder (needed to size causal predictor buffers)"
                 )
             self.enc_max_len = encoder_max_seq_length
-        elif encoder_kwargs is not None:
-            self.encoder = Encoder(**encoder_kwargs)
-            self.enc_max_len = encoder_kwargs["max_seq_length"]
+        # elif encoder_kwargs is not None:
+        #     self.encoder = Encoder(**encoder_kwargs)
+        #     self.enc_max_len = encoder_kwargs["max_seq_length"]
         else:
             raise ValueError(
                 "Either encoder= or encoder_kwargs= must be provided"
