@@ -38,8 +38,8 @@ class ReasoningDataset(Dataset):
         conversation_key: str = "messages",
         open_think_token: str = "<think>",
         close_think_token: str = "</think>",
-        max_ctx_length: int = 512,
-        max_step_length: int = 256,
+        max_ctx_token_length: int = 512,
+        max_step_token_length: int = 256,
         step_separator: Optional[str] = None,
     ):
         """
@@ -54,8 +54,8 @@ class ReasoningDataset(Dataset):
                 Used to locate the start of the chain-of-thought block.
             close_think_token: Closing think-tag text (e.g. ``"</think>"``).
                 Used to locate the end of the chain-of-thought block.
-            max_ctx_length: Maximum token length for instruction.
-            max_step_length: Maximum token length per reasoning step.
+            max_ctx_token_length: Maximum token length for instruction.
+            max_step_token_length: Maximum token length per reasoning step.
             step_separator: Regex or string to split CoT into steps.
                 Defaults to "r'\\n\\n+'" (paragraph breaks) which works
                 well with DeepSeek-R1-style CoT.  Set to
@@ -70,8 +70,8 @@ class ReasoningDataset(Dataset):
         self.close_think_token = close_think_token
         self.step_separator = step_separator or r"\n\n+"
 
-        self.max_ctx_length = max_ctx_length
-        self.max_step_length = max_step_length
+        self.max_ctx_token_length = max_ctx_token_length
+        self.max_step_token_length = max_step_token_length
 
     def __len__(self):
         return len(self.data)
@@ -130,14 +130,14 @@ class ReasoningDataset(Dataset):
         instruction = messages[0]["content"]
         response = messages[1]["content"]
 
-        ctx_ids, ctx_mask = self._tokenize(instruction, max_length=self.max_ctx_length)
+        ctx_ids, ctx_mask = self._tokenize(instruction, max_length=self.max_ctx_token_length)
 
         cot_text = self._extract_cot(response)
         steps = self._parse_steps(cot_text) if cot_text else []
 
         step_ids, step_masks = [], []
         for step in steps:
-            ids, mask = self._tokenize(step, max_length=self.max_step_length)
+            ids, mask = self._tokenize(step, max_length=self.max_step_token_length)
             step_ids.append(ids)
             step_masks.append(mask)
 
