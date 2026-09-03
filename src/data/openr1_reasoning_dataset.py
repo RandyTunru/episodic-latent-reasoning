@@ -35,12 +35,11 @@ class ReasoningDataset(Dataset):
         self,
         data: List[Dict[str, Any]],
         tokenizer,
-        instruction_key: str = "instruction",
-        response_key: str = "response",
+        conversation_key: str = "messages",
         open_think_token: str = "<think>",
         close_think_token: str = "</think>",
-        max_ctx_length: int = 512,
-        max_step_length: int = 256,
+        max_ctx_token_length: int = 512,
+        max_step_token_length: int = 256,
         step_separator: Optional[str] = None,
     ):
         """
@@ -55,8 +54,8 @@ class ReasoningDataset(Dataset):
                 Used to locate the start of the chain-of-thought block.
             close_think_token: Closing think-tag text (e.g. ``"</think>"``).
                 Used to locate the end of the chain-of-thought block.
-            max_ctx_length: Maximum token length for instruction.
-            max_step_length: Maximum token length per reasoning step.
+            max_ctx_token_length: Maximum token length for instruction.
+            max_step_token_length: Maximum token length per reasoning step.
             step_separator: Regex or string to split CoT into steps.
                 Defaults to "r'\\n\\n+'" (paragraph breaks) which works
                 well with DeepSeek-R1-style CoT.  Set to
@@ -64,22 +63,24 @@ class ReasoningDataset(Dataset):
         """
         self.data = data
         self.tokenizer = tokenizer
-        self.instruction_key = instruction_key
-        self.response_key = response_key
+
+        self.conversation_key = conversation_key
+
         self.open_think_token = open_think_token
         self.close_think_token = close_think_token
-        self.max_ctx_length = max_ctx_length
-        self.max_step_length = max_step_length
         self.step_separator = step_separator or r"\n\n+"
+
+        self.max_ctx_token_length = max_ctx_token_length
+        self.max_step_token_length = max_step_token_length
 
     def __len__(self):
         return len(self.data)
 
-    def _tokenize(self, text: str, max_length: int):
+    def _tokenize(self, text: str, max_length: int=None):
         """tokenize a single text, truncating to *max_length*."""
         out = self.tokenizer(
             text,
-            truncation=True,
+            truncation=(max_length is not None),
             max_length=max_length,
             padding=False,
             return_tensors="pt",
@@ -124,30 +125,19 @@ class ReasoningDataset(Dataset):
 
     def __getitem__(self, idx):
         example = self.data[idx]
-        instruction = example[self.instruction_key]
-        response = example[self.response_key]
+        messages = example[self.conversation_key]
 
-        # Extract the chain-of-thought from the response.
-        # The response format is typically:
-        #   <think>step 1\n\nstep 2\n\nstep 3</think>\n\nanswer text
-        # We only use the CoT portion for R-JEPA training; the final answer
-        # is not needed because the predictor learns to model reasoning
-        # dynamics, not answer generation.
+        instruction = messages[0]["content"]
+        response = messages[1]["content"]
+
+        ctx_ids, ctx_mask = self._tokenize(instruction, max_length=self.max_ctx_token_length)
+
         cot_text = self._extract_cot(response)
+        steps = self._parse_steps(cot_text) if cot_text else []
 
-        # tokenize instruction.
-        ctx_ids, ctx_mask = self._tokenize(instruction, self.max_ctx_length)
-
-        # Parse and tokenize reasoning steps.
-        # Each step is tokenized independently so that the target encoder
-        # can mean-pool each step into a single latent representation.
-        if cot_text:
-            steps = self._parse_steps(cot_text)
-        else:
-            steps = []
         step_ids, step_masks = [], []
         for step in steps:
-            ids, mask = self._tokenize(step, self.max_step_length)
+            ids, mask = self._tokenize(step, max_length=self.max_step_token_length)
             step_ids.append(ids)
             step_masks.append(mask)
 

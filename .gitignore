@@ -17,3 +17,6 @@ logs/
 
 # Test artifacts
 /*.png
+
+# IDEs and editors
+.vscode/

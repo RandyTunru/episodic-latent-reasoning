@@ -13,7 +13,10 @@ def pad_collate(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
        across *all* steps in the batch.
 
     The instruction (context) is padded to the maximum instruction length in
-    the batch.
+    the batch. 
+    
+    Works by pre-allocating a tensor of 0s up to the maximum lengths across both axes,
+    and then filling in the values for each sample.
 
     Returns a dict with keys:
         ctx_input_ids:      ``(B, max_ctx_len)``
