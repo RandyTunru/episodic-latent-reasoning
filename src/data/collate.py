@@ -40,8 +40,10 @@ def pad_collate(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     ctx_mask = torch.zeros(B, max_ctx_len, dtype=torch.bool)
     step_ids = torch.zeros(B, max_steps, max_step_len, dtype=torch.long)
     step_mask = torch.zeros(B, max_steps, max_step_len, dtype=torch.bool)
+    num_steps = torch.zeros(B, dtype=torch.long)
 
     for i, sample in enumerate(batch):
+        num_steps[i] = sample["num_steps"]
         # Instruction (context).
         c_len = sample["ctx_ids"].size(0)
         ctx_ids[i, :c_len] = sample["ctx_ids"]
@@ -59,4 +61,5 @@ def pad_collate(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         "ctx_attention_mask": ctx_mask,
         "step_input_ids": step_ids,
         "step_attention_mask": step_mask,
+        "num_steps": num_steps,
     }
