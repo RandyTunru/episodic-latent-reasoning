@@ -259,3 +259,91 @@ class CausalAttentionPredictor(RJEPAPredictor):
         x = self.up_projection(x)
         # Return only the reasoning-step positions (excluding context).
         return x[:, ctx_len:, :], router_logits
+
+    def forward_packed(
+        self,
+        packed: torch.Tensor,
+        padding_mask: torch.Tensor,
+        ctx_len: torch.Tensor,
+        S_out: int,
+    ):
+        """Forward over per-sample packed streams (precomputed training path).
+
+        The collate packs each sample as ``[ctx | steps_0..n-2]`` with
+        trailing padding only; this method inserts the learnable start
+        token at each sample's ``ctx_len`` boundary and runs the causal
+        stack with per-sample packed RoPE positions - so training
+        positions match the unpadded, batch-size-1 inference regime.
+
+        Args:
+            packed: ``(B, T, encoder_dim)`` - ctx and step inputs packed
+                per sample, trailing padding.
+            padding_mask: ``(B, T)`` bool, True = padding.
+            ctx_len: ``(B,)`` int - boundary between ctx and steps.
+            S_out: number of reasoning positions to gather (the batch's
+                padded step count).
+
+        Returns:
+            ``(predictions, router_logits)`` where predictions is
+            ``(B, S_out, encoder_dim)`` (position j = forecast of step j;
+            j = 0 is the start-token output) and router_logits is
+            ``(B, S_out)``.  Slots with ``j >= num_steps`` hold garbage -
+            the caller masks them with the step validity mask.
+        """
+        B, T, _ = packed.shape
+        device = packed.device
+
+        # Project the two input spaces through their own maps, then
+        # select by position: ctx part -> context projection, step part
+        # -> reasoning projection.  (Pad slots use the reasoning map;
+        # their values are masked downstream.)
+        pos = torch.arange(T, device=device).unsqueeze(0)          # (1, T)
+        is_ctx = pos < ctx_len.unsqueeze(1)                         # (B, T)
+
+        x_ctx = self.context_down_projection(packed)                # (B, T, P)
+        x_stp = self.reasoning_down_projection(packed)              # (B, T, P)
+        x = torch.where(is_ctx.unsqueeze(-1), x_ctx, x_stp)
+
+        # Insert the learnable start token at each sample's ctx/step
+        # boundary: positions > ctx_len shift right by one.
+        T1 = T + 1
+        pos1 = torch.arange(T1, device=device).unsqueeze(0)         # (1, T1)
+        src_pos = torch.where(
+            pos1 > ctx_len.unsqueeze(1), pos1 - 1, pos1.clamp(max=T - 1),
+        )                                                            # (B, T1)
+        x = x.gather(1, src_pos.unsqueeze(-1).expand(B, T1, x.size(-1)))
+        start_mask = pos1 == ctx_len.unsqueeze(1)                    # (B, T1)
+        x = torch.where(
+            start_mask.unsqueeze(-1), self.start_token.expand(B, T1, -1), x,
+        )
+
+        # Masks: real content is valid; the start token is always valid.
+        valid = ~padding_mask                                          # (B, T)
+        valid = valid.gather(1, src_pos)                               # (B, T1)
+        valid = valid | start_mask
+        total_padding_mask = ~valid                                    # (B, T1)
+
+        # Per-batch uniform RoPE frequencies and causal mask for the full predictor window.
+        batch_freqs_cis = self.freqs_cis[:T1]                          # (T1, d_k/2)
+        causal_mask = self.mask[:, :, :T1, :T1]                         
+
+        for layer in self.layers:
+            x = layer(
+                x, mask=causal_mask, freqs_cis=batch_freqs_cis,
+                key_padding_mask=total_padding_mask,
+            )
+        x = self.norm(x)
+
+        router_all = self.router(x).squeeze(-1)                        # (B, T1)
+        x = self.up_projection(x)                                      # (B, T1, E)
+
+        # Gather reasoning positions: output j of sample i sits at packed
+        # position ctx_len[i] + j - j = 0 is the start-token output
+        # (the forecast of step 0), so it reads position ctx_len[i],
+        # which the start token occupies.
+        out_pos = ctx_len.unsqueeze(1) + torch.arange(S_out, device=device).unsqueeze(0)
+        out_pos = out_pos.clamp(max=T1 - 1)                            # (B, S_out)
+        predictions = x.gather(1, out_pos.unsqueeze(-1).expand(B, S_out, x.size(-1)))
+        router_logits = router_all.gather(1, out_pos)
+
+        return predictions, router_logits

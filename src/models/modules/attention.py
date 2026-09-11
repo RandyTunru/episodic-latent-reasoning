@@ -24,7 +24,11 @@ class Attention(nn.Module, ABC):
 
         Args:
             x: (batch_size, num_heads, seq_len, d_k)
-            freqs_cis: (seq_len, d_k) complex-valued precomputed frequencies.
+            freqs_cis: either (seq_len, d_k/2) - one shared rotation table
+                for the whole batch (uniform positions), or
+                (batch_size, seq_len, d_k/2) - per-sample per-position
+                rotations (packed sequences where each sample's real
+                positions start at 0).
 
         Returns:
             Tensor of same shape as x with RoPE applied.
@@ -34,11 +38,15 @@ class Attention(nn.Module, ABC):
         assert freqs_cis.size(-1) == self.d_k // 2, (
             f"freqs_cis last dim ({freqs_cis.size(-1)}) must equal d_k // 2 ({self.d_k // 2})"
         )
-        assert freqs_cis.size(0) >= x.size(2), "freqs_cis must have enough length for the given seq_len"
-        assert freqs_cis.dim() == 2, "freqs_cis must be a 2D tensor"
+        assert freqs_cis.dim() in (2, 3), "freqs_cis must be 2D (shared) or 3D (per-sample)"
         seq_len = x.size(2)
+        assert freqs_cis.size(-2) >= seq_len, "freqs_cis must have enough length for the given seq_len"
 
-        freqs_cis = freqs_cis[:seq_len]
+        if freqs_cis.dim() == 3:
+            # (B, seq_len, d_k/2) -> (B, 1, seq_len, d_k/2); per-sample positions.
+            freqs_cis = freqs_cis[:, :seq_len].unsqueeze(1)
+        else:
+            freqs_cis = freqs_cis[:seq_len]  # (seq_len, d_k/2); shared across batch & heads
         freqs_cis = freqs_cis.to(x.device)
 
         x_reshaped = x.float().view(*x.shape[:-1], self.d_k // 2, 2)
