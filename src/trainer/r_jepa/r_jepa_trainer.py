@@ -53,7 +53,7 @@ class Trainer:
         # monitor uses encoder_max_seq_length as a rough upper bound.
         self.monitor = ThroughputMonitor(
             config["batch_size"] * self.grad_accum_steps,
-            config["encoder_max_seq_length"],
+            config["encoder_max_seq_len"] + config["predictor_max_seq_len"],
         )
 
     # ------------------------------------------------------------------
@@ -105,20 +105,19 @@ class Trainer:
                 try:
                     batch = next(data_iter)
                 except StopIteration:
+                    if self.config['no_epochs']:
+                        print("Dataset exhausted. Stopping training.")
+                        return step
                     data_iter = iter(self.dataloader)
                     batch = next(data_iter)
 
-                # Move to device.
-                ctx_ids = batch["ctx_input_ids"].to(self.device)
-                ctx_mask = batch["ctx_attention_mask"].to(self.device)
-                step_ids = batch["step_input_ids"].to(self.device)
-                step_mask = batch["step_attention_mask"].to(self.device)
+                # Move to device and forward.  The model branches on the
+                # batch dict's contents (text path vs precomputed path).
+                batch = {k: v.to(self.device) for k, v in batch.items()}
 
                 with ctx:
-                    preds, targets, router_logits, step_valid = self.model(
-                        ctx_ids, ctx_mask, step_ids, step_mask,
-                    )
-                    loss = self._compute_loss(
+                    preds, targets, router_logits, step_valid = self.model(batch)
+                    loss, regression_loss, router_bce = self._compute_loss(
                         preds, targets, router_logits, step_valid,
                     )
                     loss = loss / self.grad_accum_steps
@@ -137,12 +136,15 @@ class Trainer:
                 tps = self.monitor.get_tps()
                 wandb.log({
                     "train/loss": accum_loss,
+                    "train/regression_loss": regression_loss,
+                    "train/router_bce": router_bce,
                     "train/learning_rate": lr,
                     "metrics/throughput_tps": tps,
                     "step": step,
                 })
                 print(
                     f"Step {step:06d} | loss={accum_loss:.4f} | "
+                    f"reg_loss={regression_loss:.4f} | router_bce={router_bce:.4f} | "
                     f"lr={lr:.2e} | tps={tps:.0f}"
                 )
 
@@ -219,7 +221,7 @@ class Trainer:
         )  # (B, S)
         router_bce = (bce_per_step * valid_float).sum() / num_valid
 
-        return regression_loss + self.router_alpha * router_bce
+        return regression_loss + self.router_alpha * router_bce, regression_loss, router_bce
 
     # ------------------------------------------------------------------
     # Checkpointing
