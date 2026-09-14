@@ -11,8 +11,10 @@ The loss has two components:
    step positions do not contribute.  
 2. **BCE (router)** - binary cross-entropy on the halting router.
    Pseudo-labels are derived from the position structure: all real
-   intermediate steps are "continue" (1), the last real step is "halt" (0),
-   and padding positions are ignored via the loss mask.
+   intermediate steps are "continue" (1), the last visible step is
+   "halt" (0) when the true end (``num_steps_true``) is inside the row -
+   cut rows show all continues - and padding positions are ignored via
+   the loss mask.
 """
 
 import math
@@ -119,6 +121,8 @@ class Trainer:
                     preds, targets, router_logits, step_valid = self.model(batch)
                     loss, regression_loss, router_bce = self._compute_loss(
                         preds, targets, router_logits, step_valid,
+                        num_steps=batch["num_steps"],
+                        num_steps_true=batch.get("num_steps_true"),
                     )
                     loss = loss / self.grad_accum_steps
 
@@ -166,6 +170,8 @@ class Trainer:
         targets: torch.Tensor,
         router_logits: torch.Tensor,
         step_valid_mask: torch.Tensor,
+        num_steps: torch.Tensor,
+        num_steps_true: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Joint MSE + router BCE loss, masked for padding.
 
@@ -181,12 +187,17 @@ class Trainer:
 
         **Router BCE** - The router learns when to halt.  Pseudo-labels are
         derived from the position structure:
-          - All intermediate valid steps → label 1 (continue reasoning)
-          - The last valid step → label 0 (halt here)
+          - All valid steps → label 1 (continue reasoning)
+          - The last visible step → label 0 (halt here) - only when the
+            TRUE end is visible (``num_steps_true == num_steps``, i.e.
+            neither the storage cap nor the window cut the sequence).
+            Cut rows show all continues: the visible steps are a prefix
+            of an episode that keeps going, and labeling the cut "halt"
+            would teach the router to stop mid-reasoning.
           - Padding positions → excluded from loss
 
         The hyperparameter α (router_alpha) balances the two objectives.
-        Typical values are 0.05–0.2, tuned so that the MSE and BCE losses
+        Typical values are 0.05-0.2, tuned so that the MSE and BCE losses
         are roughly the same order of magnitude at the start of training.
 
         Args:
@@ -194,6 +205,11 @@ class Trainer:
             targets: ``(B, S, E)`` target representations (stop-gradient).
             router_logits: ``(B, S)`` raw halting scores.
             step_valid_mask: ``(B, S)`` bool, ``True`` = real step.
+            num_steps: ``(B,)`` int64 - visible steps per sample
+                (post-cap); delimits the valid positions.
+            num_steps_true: ``(B,)`` int64 - TRUE step count X, never
+                capped.  ``== num_steps`` iff the true end (the halt
+                position) is inside the visible row.
 
         Returns:
             Scalar loss = smooth L1 + α · BCE.
@@ -209,12 +225,19 @@ class Trainer:
         regression_loss = (reg_per_step * valid_float).sum() / num_valid
 
         # --- Router BCE ---
-        # Pseudo-labels are derived from position structure - no external supervision needed.
+        # Pseudo-labels are derived from position structure - no external
+        # supervision needed.  The halt belongs at the TRUE end of the
+        # episode, recorded in ``num_steps_true`` (X).  It is placed only
+        # when that end is visible in the row: ``num_steps_true ==
+        # num_steps`` means neither the storage cap nor the window cut the
+        # sequence.  Cut rows show all continues - the visible steps are a
+        # prefix of an episode that keeps going, and labeling the cut
+        # "halt" would teach the router to stop mid-reasoning.
+        if num_steps_true is None:
+            num_steps_true = num_steps  # text path: no caps, num_steps IS X
         router_labels = valid_float.clone()  # 1.0 where valid, 0.0 where pad
-        for b in range(B):
-            pos = step_valid_mask[b].nonzero(as_tuple=True)[0]
-            if pos.numel() > 0:
-                router_labels[b, pos[-1]] = 0.0  # last valid step → halt
+        halt = (num_steps > 0) & (num_steps_true == num_steps)
+        router_labels[halt, num_steps[halt] - 1] = 0.0  # last real step → halt
 
         bce_per_step = F.binary_cross_entropy_with_logits(
             router_logits, router_labels, reduction="none",

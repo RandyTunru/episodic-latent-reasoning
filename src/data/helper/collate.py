@@ -81,6 +81,7 @@ def pad_collate_precomputed_cross(batch: List[Dict[str, Any]]) -> Dict[str, torc
         ctx_attention_mask: ``(B, max_ctx_len)`` bool
         step_targets:       ``(B, max_steps, E)`` bf16
         num_steps:          ``(B,)`` int64
+        num_steps_true:     ``(B,)`` int64 - true count X (halt signal)
     """
     B = len(batch)
     E = batch[0]["ctx_embeddings"].size(-1)
@@ -92,6 +93,7 @@ def pad_collate_precomputed_cross(batch: List[Dict[str, Any]]) -> Dict[str, torc
     ctx_mask = torch.zeros(B, max_ctx_len, dtype=torch.bool)
     steps = torch.zeros(B, max_steps, E, dtype=torch.bfloat16)
     num_steps = torch.zeros(B, dtype=torch.long)
+    num_steps_true = torch.zeros(B, dtype=torch.long)
 
     for i, sample in enumerate(batch):
         c_len = sample["ctx_embeddings"].size(0)
@@ -100,12 +102,14 @@ def pad_collate_precomputed_cross(batch: List[Dict[str, Any]]) -> Dict[str, torc
         ctx_mask[i, :c_len] = True
         steps[i, :n] = sample["step_targets"]
         num_steps[i] = n
+        num_steps_true[i] = sample["num_steps_true"]
 
     return {
         "ctx_embeddings": ctx,
         "ctx_attention_mask": ctx_mask,
         "step_targets": steps,
         "num_steps": num_steps,
+        "num_steps_true": num_steps_true,  # X - where the true halt is
     }
 
 
@@ -128,6 +132,7 @@ def pad_collate_precomputed_causal(batch: List[Dict[str, Any]]) -> Dict[str, tor
         ctx_len:          ``(B,)`` int64 - ctx/step boundary per sample
         step_targets:     ``(B, max_steps, E)`` bf16 - loss targets
         num_steps:        ``(B,)`` int64
+        num_steps_true:   ``(B,)`` int64 - true count X (halt signal)
     """
     B = len(batch)
     E = batch[0]["ctx_embeddings"].size(-1)
@@ -144,12 +149,14 @@ def pad_collate_precomputed_causal(batch: List[Dict[str, Any]]) -> Dict[str, tor
     valid = torch.zeros(B, T, dtype=torch.bool)
     ctx_len = torch.zeros(B, dtype=torch.long)
     num_steps = torch.zeros(B, dtype=torch.long)
+    num_steps_true = torch.zeros(B, dtype=torch.long)
 
     for i, (r, s) in enumerate(zip(rows, batch)):
         packed[i, : r.size(0)] = r
         valid[i, : r.size(0)] = True
         ctx_len[i] = s["ctx_embeddings"].size(0)
         num_steps[i] = s["num_steps"]
+        num_steps_true[i] = s["num_steps_true"]
 
     # Targets for the loss side, padded along the steps axis only.
     S = max(max(s["num_steps"] for s in batch), 1)
@@ -163,4 +170,5 @@ def pad_collate_precomputed_causal(batch: List[Dict[str, Any]]) -> Dict[str, tor
         "ctx_len": ctx_len,
         "step_targets": targets,
         "num_steps": num_steps,
+        "num_steps_true": num_steps_true,  # X - where the true halt is
     }

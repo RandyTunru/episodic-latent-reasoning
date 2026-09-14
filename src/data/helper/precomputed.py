@@ -3,10 +3,17 @@
 Each precompute run with ``--branch`` produces one parquet file per rank
 under ``<output_dir>/<branch>/``:
 
-    targets:  sample_index  int64   - join key, original dataset index
-              num_steps     int32   - number of reasoning steps
-              step_targets  binary  - pooled per-step vectors, unpadded
-                                      ``(num_steps, E)`` bf16
+    targets:  sample_index      int64  - join key, original dataset index
+              num_steps         int32  - TRUE number of reasoning steps
+                                          (never capped - the router's
+                                          halt signal)
+              num_steps_stored  int32  - vectors actually stored in the
+                                          blob, ``min(num_steps,
+                                          max_steps)`` (the bucketing
+                                          key at load time)
+              step_targets      binary - pooled per-step vectors,
+                                          unpadded ``(num_steps_stored,
+                                          E)`` bf16
 
     ctx:      sample_index   int64  - join key, original dataset index
               ctx_len        int32  - number of tokens in the instruction
@@ -22,7 +29,7 @@ by separate runs (potentially with different encoder models) and are
 joined at load time on ``sample_index`` - row order is *not* part of
 the contract.
 
-The training loader validates each file with :func:`validate_parquet`
+The training loader validates each file with `validate_parquet`
 before consuming it; the precompute script runs the same check on its
 own output, so the writer and the reader share one definition of
 "well-formed".
@@ -40,6 +47,7 @@ SCHEMAS = {
     "targets": pa.schema([
         pa.field("sample_index", pa.int64()),
         pa.field("num_steps", pa.int32()),
+        pa.field("num_steps_stored", pa.int32()),
         pa.field("step_targets", pa.binary()),
     ]),
     "ctx": pa.schema([
@@ -50,7 +58,11 @@ SCHEMAS = {
 }
 
 # Per-branch length column: pairs the explicit length with its blob so
-# validation can check the two agree.
+# validation can check the two agree.  targets: ``num_steps`` records
+# the true step count and the blob may be shorter when a storage cap
+# was used (exact agreement is checked against ``num_steps_stored``);
+# ctx: the truncation happens at tokenization, so the column always
+# equals the blob.
 LENGTH_COLUMNS = {
     "targets": ("num_steps", "step_targets"),
     "ctx": ("ctx_len", "ctx_embeddings"),
@@ -74,8 +86,12 @@ def validate_parquet(
        (checked on the first ``max_rows_to_check`` rows - reading the
        full binary column costs a whole-file scan, and the training
        loader re-derives every blob length when it decodes).
-    4. The branch's explicit length column (``num_steps`` / ``ctx_len``)
-       equals the blob's element count.
+    4. The explicit length columns agree with the blob's element count:
+       ``ctx`` - ``ctx_len`` equals the blob rows (the truncation
+       happens at tokenization); ``targets`` - ``num_steps_stored``
+       equals the blob rows exactly and never exceeds ``num_steps``
+       (the true count may exceed what a storage cap stored, never the
+       reverse).
 
     Raises ``ValueError`` on the first violated check.
 
@@ -104,7 +120,9 @@ def validate_parquet(
     # 3/4. Blob shape consistency (sampled rows only - see docstring).
     vec_bytes = hidden_size * BF16_BYTES
     length_col, blob_col = LENGTH_COLUMNS[branch]
-    for batch in parquet.iter_batches(columns=[length_col, blob_col], batch_size=256):
+    stored_col = "num_steps_stored" if branch == "targets" else None
+    cols = [length_col, blob_col] + ([stored_col] if stored_col else [])
+    for batch in parquet.iter_batches(columns=cols, batch_size=256):
         rows = batch.to_pydict()
         for blob in rows[blob_col]:
             if len(blob) % vec_bytes != 0:
@@ -112,11 +130,27 @@ def validate_parquet(
                     f"{path}: blob length {len(blob)} not divisible by {vec_bytes} "
                     f"(hidden_size={hidden_size}, bf16)"
                 )
-        for length, blob in zip(rows[length_col], rows[blob_col]):
-            if length != len(blob) // vec_bytes:
+        for i in range(len(rows[blob_col])):
+            length = rows[length_col][i]
+            n_vectors = len(rows[blob_col][i]) // vec_bytes
+            if stored_col:
+                # The stored count is explicit: the blob must match it
+                # exactly, and it can never exceed the true step count.
+                stored = rows[stored_col][i]
+                if n_vectors != stored:
+                    raise ValueError(
+                        f"{path}: num_steps_stored={stored} but blob holds "
+                        f"{n_vectors} vectors"
+                    )
+                if stored > length:
+                    raise ValueError(
+                        f"{path}: num_steps_stored={stored} exceeds "
+                        f"num_steps={length}"
+                    )
+            elif length != n_vectors:
                 raise ValueError(
                     f"{path}: {length_col}={length} but blob holds "
-                    f"{len(blob) // vec_bytes} vectors"
+                    f"{n_vectors} vectors"
                 )
         max_rows_to_check -= len(rows[blob_col])
         if max_rows_to_check <= 0:

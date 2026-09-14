@@ -6,8 +6,15 @@ run, selected by ``--branch``:
 
     targets  - pooled per-step encodings (the R-JEPA regression targets).
                One row per sample: ``(sample_index, num_steps,
-               step_targets)``, where ``step_targets`` is an unpadded
-               ``(num_steps, E)`` bf16 blob.
+               num_steps_stored, step_targets)``, where ``step_targets``
+               is an unpadded bf16 blob.  ``num_steps`` is the TRUE
+               (uncapped) step count from the separation - the router's
+               halt signal, so the column is never capped.
+               ``--max-steps`` caps only the stored blob;
+               ``num_steps_stored`` records that capped count
+               (``min(num_steps, max_steps)`` vectors per row) so the
+               training-time bucketing sampler has the exact effective
+               length without decoding blobs.
     ctx      - token-level instruction encodings (the predictor's context
                conditioning).  One row per sample: ``(sample_index,
                ctx_len, ctx_embeddings)``, an unpadded ``(ctx_len, E)``
@@ -22,7 +29,7 @@ GPU efficiency.
 
 Blobs are raw little-endian bytes; shapes recover via ``len(blob) //
 (E * 2)``.  The contract itself lives in
-``src/data/helpers/precomputed.py`` and is validated against this
+``src/data/helper/precomputed.py`` and is validated against this
 script's own output before it reports success.
 
 Distributed: each rank wraps the encoder in DDP and encodes a shard of
@@ -187,17 +194,24 @@ def parse_args() -> argparse.Namespace:
         help="targets branch only: regex that splits CoT into steps",
     )
     parser.add_argument(
-        "--max-ctx-tokens", type=int, default=512,
-        help="ctx branch only: instruction truncation length",
+        "--max-ctx-tokens", type=int, default=None,
+        help="ctx branch only: instruction truncation length "
+        "(None = store the full instruction)" 
+        "(discouraged - cap at load via the training config instead)",
     )
     parser.add_argument(
-        "--max-step-tokens", type=int, default=256,
-        help="targets branch only: per-step truncation length",
+        "--max-step-tokens", type=int, default=None,
+        help="targets branch only: per-step truncation length "
+        "(None = store each full step)"
+        "(discouraged - cap at load via the training config instead)",
     )
     parser.add_argument(
         "--max-steps", type=int, default=None,
-        help="targets branch only: cap reasoning steps per sample "
-        "(outliers: p95=87, max=401 in science)",
+        help="targets branch only: cap the STORED step_targets blob per "
+        "sample (None = store every step).  num_steps still records the "
+        "TRUE step count - it is the router's halt signal, never capped.  "
+        "num_steps_stored records the capped count so training buckets "
+        "by the exact effective length",
     )
     parser.add_argument(
         "--step-tokens-per-chunk", type=int, default=65536,
@@ -360,15 +374,22 @@ def main() -> None:
                     })
                     ctx_bytes_total += ctx_len * E * 2
                 else:
-                    n_steps = int(num_steps[i].item())
+                    # num_steps stores the TRUE step count (X): it is the
+                    # router's halt signal, so the column is never capped.
+                    # --max-steps caps only the stored blob;
+                    # num_steps_stored records that capped count (the
+                    # bucketing key at load time).
+                    n_true = int(num_steps[i].item())
+                    n_store = n_true
                     if args.max_steps is not None:
-                        n_steps = min(n_steps, args.max_steps)
+                        n_store = min(n_store, args.max_steps)
                     rows.append({
                         "sample_index": sample_index,
-                        "num_steps": n_steps,
-                        "step_targets": to_bytes(pooled[i, :n_steps]),
+                        "num_steps": n_true,
+                        "num_steps_stored": n_store,
+                        "step_targets": to_bytes(pooled[i, :n_store]),
                     })
-                    step_bytes_total += n_steps * E * 2
+                    step_bytes_total += n_store * E * 2
             row_offset += B
 
             if len(rows) >= write_every:
@@ -421,7 +442,7 @@ def main() -> None:
             ]
             summary = {
                 "branch": args.branch,
-                "dataset": f"{args.dataset_id}/{args.dataset_config}/{args.split}",
+                "dataset": f"{args.dataset_id}/{args.subset}/{args.split}",
                 "model_id": args.model_id,
                 "pooling": args.pooling,
                 "hidden_size": E,

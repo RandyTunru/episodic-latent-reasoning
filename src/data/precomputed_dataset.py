@@ -63,8 +63,14 @@ class PrecomputedReasoningDataset(Dataset):
             ``part-*.parquet`` files.
         hidden_size: Encoder width ``E`` used by the precompute run
             (blob shapes are recovered as ``len(blob) // (E * 2)``).
-        max_steps: Optional cap on reasoning steps per sample (truncates
-            the long tail at load time; e.g. p95=87, max=401 in science).
+        max_steps: Optional cap on reasoning steps per sample, applied
+            AT LOAD (training).  The stored data is untouched; the
+            sample's ``num_steps`` clamps while ``num_steps_true`` keeps
+            the true count, so the trainer can tell whether the true end
+            (the router's halt position) is inside the visible window.
+        max_ctx_len: Optional cap on ctx tokens per sample, applied at
+            load (training).  Slices the stored embeddings - no
+            re-encoding.
         validate: Run :func:`validate_pair` before reading (cheap; reads
             schemas and key columns only).
 
@@ -74,7 +80,10 @@ class PrecomputedReasoningDataset(Dataset):
         step_targets: ``(num_steps, E)`` bf16 - pooled per-step encodings,
             unpadded.
         ctx_len: int - number of instruction tokens.
-        num_steps: int - number of reasoning steps (post-cap).
+        num_steps: int - effective reasoning steps, ``min(X, P, T)``
+            (storage cap, load cap).
+        num_steps_true: int - the true count X, never capped; where the
+            episode's halt really is.
     """
 
     def __init__(
@@ -83,6 +92,7 @@ class PrecomputedReasoningDataset(Dataset):
         targets_dir: Union[str, Path],
         hidden_size: int,
         max_steps: Optional[int] = None,
+        max_ctx_len: Optional[int] = None,
         validate: bool = True,
     ):
         ctx_paths = sorted(Path(ctx_dir).glob("part-*.parquet"))
@@ -104,11 +114,14 @@ class PrecomputedReasoningDataset(Dataset):
         self._tgt_cache = (None, None)
         self.hidden_size = hidden_size
         self.max_steps = max_steps
+        self.max_ctx_len = max_ctx_len
 
-        # Eager part: key + length columns only (~3 MB for the full
+        # Eager part: key + length columns only (~4 MB for the full
         # split).  The lengths feed the bucketed batch sampler.
         ctx_cols = pq.read_table(ctx_paths, columns=["sample_index", "ctx_len"]).to_pandas()
-        tgt_cols = pq.read_table(tgt_paths, columns=["sample_index", "num_steps"]).to_pandas()
+        tgt_cols = pq.read_table(
+            tgt_paths, columns=["sample_index", "num_steps_stored"],
+        ).to_pandas()
         ctx_keys = ctx_cols["sample_index"].tolist()
         tgt_keys = tgt_cols["sample_index"].tolist()
         self.ctx_pos = {k: i for i, k in enumerate(ctx_keys)}
@@ -117,11 +130,22 @@ class PrecomputedReasoningDataset(Dataset):
 
         # Length arrays aligned with self.keys order (for the sampler).
         ctx_len_by_key = dict(zip(ctx_keys, ctx_cols["ctx_len"].tolist()))
-        num_steps_by_key = dict(zip(tgt_keys, tgt_cols["num_steps"].tolist()))
-        self.ctx_lens = np.array([ctx_len_by_key[k] for k in self.keys], dtype=np.int64)
-        self.num_steps_arr = np.array(
-            [num_steps_by_key[k] for k in self.keys], dtype=np.int64
+        # Bucketing key: num_steps_stored records min(X, P) - the exact
+        # effective length before the load cap - so the key equals what
+        # each sample actually costs at train time, with no blob
+        # decoding.  num_steps (X) stays in the column untouched as the
+        # router's halt signal.
+        stored_by_key = dict(zip(tgt_keys, tgt_cols["num_steps_stored"].tolist()))
+        ctx_lens = np.array([ctx_len_by_key[k] for k in self.keys], dtype=np.int64)
+        num_steps_arr = np.array(
+            [stored_by_key[k] for k in self.keys], dtype=np.int64
         )
+        if max_ctx_len is not None:
+            ctx_lens = np.minimum(ctx_lens, max_ctx_len)
+        if max_steps is not None:
+            num_steps_arr = np.minimum(num_steps_arr, max_steps)
+        self.ctx_lens = ctx_lens
+        self.num_steps_arr = num_steps_arr
 
     def __len__(self) -> int:
         return len(self.keys)
@@ -163,24 +187,28 @@ class PrecomputedReasoningDataset(Dataset):
         ctx_row = self._fetch("_ctx_cache", self._ctx_entries, self._ctx_starts, self.ctx_pos[key])
         tgt_row = self._fetch("_tgt_cache", self._tgt_entries, self._tgt_starts, self.tgt_pos[key])
 
-        num_steps = int(tgt_row["num_steps"][0])
+        # The column records the TRUE step count (X) - the router's halt
+        # signal.  The stored blob may hold fewer rows when a storage cap
+        # was used, so the effective length is clamped to what is actually
+        # stored (and to the load-time cap).
+        num_steps_true = int(tgt_row["num_steps"][0])
+        tgt = torch.frombuffer(
+            tgt_row["step_targets"][0], dtype=torch.bfloat16,
+        ).reshape(-1, self.hidden_size)  # min(X, P) rows
         if self.max_steps is not None:
-            num_steps = min(num_steps, self.max_steps)
+            tgt = tgt[: self.max_steps]
+        num_steps = tgt.size(0)  # effective min(X, P, T)
 
         ctx = torch.frombuffer(
             ctx_row["ctx_embeddings"][0], dtype=torch.bfloat16,
         ).reshape(-1, self.hidden_size)  # (ctx_len, E)
-
-        if num_steps > 0:
-            tgt = torch.frombuffer(
-                tgt_row["step_targets"][0], dtype=torch.bfloat16,
-            ).reshape(-1, self.hidden_size)[:num_steps]
-        else:
-            tgt = torch.zeros(0, self.hidden_size, dtype=torch.bfloat16)
+        if self.max_ctx_len is not None:
+            ctx = ctx[: self.max_ctx_len]
 
         return {
             "ctx_embeddings": ctx,   # read-only views; collate copies into padded tensors
             "step_targets": tgt,
-            "ctx_len": int(ctx_row["ctx_len"][0]),
-            "num_steps": num_steps,
+            "ctx_len": min(int(ctx_row["ctx_len"][0]), self.max_ctx_len or 2**30),
+            "num_steps": num_steps,            # effective min(X, P, T)
+            "num_steps_true": num_steps_true,  # X - where the true halt is
         }
