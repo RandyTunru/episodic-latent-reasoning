@@ -90,6 +90,7 @@ def main() -> None:
         targets_dir=config["targets_dir"],
         hidden_size=config["encoder_hidden_size"],
         max_steps=config["predictor_max_seq_len"],
+        max_ctx_len=config["encoder_max_seq_len"],
     )
 
     if config["cross_attention"]:
