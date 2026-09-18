@@ -96,7 +96,7 @@ def init_process_group(rank: int, world_size: int, backend_arg: str) -> str:
                 init_method="env://",
                 rank=rank,
                 world_size=world_size,
-                timeout=timedelta(minutes=30),
+                timeout=timedelta(hours=24),
             )
             print(f"[rank {rank}] process group initialized (backend={backend})", flush=True)
             return backend
@@ -292,9 +292,6 @@ def main() -> None:
     )
 
     # ---- frozen encoder (forward-only; DDP wrapper for multi-GPU) ----
-    # sdpa keeps attention memory linear in the chunk length; without it
-    # an eager-attention fallback would materialize quadratic score
-    # matrices and blow up on large step chunks.
     encoder = AutoModel.from_pretrained(
         args.model_id, dtype=torch.bfloat16, attn_implementation="sdpa",
     ).to(device)
@@ -374,19 +371,14 @@ def main() -> None:
                     })
                     ctx_bytes_total += ctx_len * E * 2
                 else:
-                    # num_steps stores the TRUE step count (X): it is the
-                    # router's halt signal, so the column is never capped.
-                    # --max-steps caps only the stored blob;
-                    # num_steps_stored records that capped count (the
-                    # bucketing key at load time).
                     n_true = int(num_steps[i].item())
                     n_store = n_true
                     if args.max_steps is not None:
                         n_store = min(n_store, args.max_steps)
                     rows.append({
                         "sample_index": sample_index,
-                        "num_steps": n_true,
-                        "num_steps_stored": n_store,
+                        "num_steps": n_true, # the true step count (uncapped)
+                        "num_steps_stored": n_store, # the capped step count (capped by --max-steps)
                         "step_targets": to_bytes(pooled[i, :n_store]),
                     })
                     step_bytes_total += n_store * E * 2
