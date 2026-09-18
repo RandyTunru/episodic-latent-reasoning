@@ -1,0 +1,45 @@
+project_name: "qwen-3.4b-rjepa"
+run_name: "qwen-3-llm.4b-rjepa-openr1-science-01"
+run_id: "xdc9p50s"
+
+# Data
+ctx_dir: "data/openr1_science_precompute/ctx/Qwen_Qwen3-4B"
+targets_dir: "data/openr1_science_precompute/targets/Qwen_Qwen3-Embedding-4B"
+
+# Predictor
+cross_attention: false
+predictor_hidden_size: 1280
+predictor_num_heads: 16
+predictor_d_ff: 4096
+predictor_num_layers: 18
+predictor_max_seq_len: 512
+
+router_alpha: 0.2
+
+# Encoder
+encoder_hidden_size: 2560
+encoder_max_seq_len: 2048
+encoder_pooling: "eos"
+
+# Optimization
+batch_size: 16
+gradient_accumulation_steps: 1
+learning_rate: 5.0e-4
+weight_decay: 0.01
+warmup_steps: 1000
+max_steps: 100000 # 173k rows : 16 = 10812 steps per epoch, 100k steps = 9.25 epochs
+
+# Logging
+log_every: 100
+save_every: 10000
+
+wandb_dir : "logs"
+checkpoint_dir : "artifacts/checkpoints/qwen3_llm_4b_rjepa_openr1_science_01"
+
+# Checkpoint loading
+from_checkpoint: "artifacts/checkpoints/qwen3_llm_4b_rjepa_openr1_science_01/model_step_40000.pt"
+is_resume: true
+
+# Miscellaneous
+num_workers: 4
+no_epochs: false
