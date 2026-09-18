@@ -93,7 +93,7 @@ class Trainer:
         print("Starting R-JEPA training loop …")
         self.monitor.start()
 
-        while step < self.config["max_steps"]:
+        while step <= self.config["max_steps"]:
             # ---- LR schedule ----
             lr = self.get_lr(step)
             for pg in self.optimizer.param_groups:
@@ -259,5 +259,9 @@ class Trainer:
             "step": step,
             "config": self.config,
         }
-        torch.save(checkpoint, filepath)
+        
+        # Atomic save
+        tmp_path = filepath + ".tmp"
+        torch.save(checkpoint, tmp_path)
+        os.replace(tmp_path, filepath)
         print(f"Checkpoint saved → {filepath}")
