@@ -346,4 +346,4 @@ class CausalAttentionPredictor(RJEPAPredictor):
         predictions = x.gather(1, out_pos.unsqueeze(-1).expand(B, S_out, x.size(-1)))
         router_logits = router_all.gather(1, out_pos)
 
-        return predictions, router_logits
+        return predictions, router_logits # Only the reasoning-step positions are returned; context is discarded.
