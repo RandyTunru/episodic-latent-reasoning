@@ -82,6 +82,14 @@ class BucketedBatchSampler(Sampler):
             n += (members.size + self.batch_size - 1) // self.batch_size
         return n
 
+    def _sample_per_bucket(self, num_samples: int) -> List[int]:
+        """Return the last few elements of each bucket"""
+        samples = []
+        for members in self.buckets:
+            if members.size > 0:
+                samples.extend(members[-num_samples:].tolist())
+        return samples
+
     def __iter__(self):
         batches: List[np.ndarray] = []
         for members in self.buckets:

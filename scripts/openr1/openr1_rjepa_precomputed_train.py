@@ -25,9 +25,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import numpy as np
 import torch
 import wandb
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -100,11 +101,44 @@ def main() -> None:
         primary, secondary = dataset.bucket_keys("causal")
         collate_fn = pad_collate_precomputed_causal
 
-    sampler = BucketedBatchSampler(
+    # Hold out the last few rows of each length bucket for router eval:
+    # stratified by chain length so the halting metrics see the full
+    # length distribution instead of the mostly-short mode.  The holdout
+    # is removed from training, and each split gets its own bucketed
+    # sampler over ITS OWN coordinate space - bucket membership does not
+    # survive subsetting.
+    full_sampler = BucketedBatchSampler(
         primary, secondary=secondary, batch_size=config["batch_size"],
     )
-    loader = DataLoader(
-        dataset, batch_sampler=sampler, collate_fn=collate_fn,
+    val_samples = full_sampler._sample_per_bucket(
+        num_samples=config.get("val_per_bucket", config["batch_size"])
+    )
+    val_indices = sorted({int(i) for i in val_samples})
+    train_indices = np.setdiff1d(
+        np.arange(len(dataset)), np.asarray(val_indices), assume_unique=True,
+    ).tolist()
+
+    training_dataset = Subset(dataset, train_indices)
+    validation_dataset = Subset(dataset, val_indices)
+
+    train_sampler = BucketedBatchSampler(
+        primary[train_indices],
+        secondary=None if secondary is None else secondary[train_indices],
+        batch_size=config["batch_size"],
+    )
+    val_sampler = BucketedBatchSampler(
+        primary[val_indices],
+        secondary=None if secondary is None else secondary[val_indices],
+        batch_size=config["batch_size"],
+    )
+
+    train_loader = DataLoader(
+        training_dataset, batch_sampler=train_sampler, collate_fn=collate_fn,
+        num_workers=config["num_workers"],
+    )
+
+    val_loader = DataLoader(
+        validation_dataset, batch_sampler=val_sampler, collate_fn=collate_fn,
         num_workers=config["num_workers"],
     )
 
@@ -168,8 +202,12 @@ def main() -> None:
         config=config
     )
 
-    trainer = Trainer(model, loader, optimizer, config, device, start_step=start_step)
-    trainer.train()
+    trainer = Trainer(model, train_loader, val_loader, optimizer, config, device, start_step=start_step)
+    final_step = trainer.train()
+
+    trainer.save_checkpoint(final_step)
+
+    wandb.finish()
 
 
 if __name__ == "__main__":

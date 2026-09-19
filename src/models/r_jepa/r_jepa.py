@@ -284,8 +284,9 @@ class RJEPABase(nn.Module):
                 [reasoning_steps, predictions[:, -1:, :]], dim=1
             )
 
-            # Halt if the router signals convergence.
-            if router_logits[:, -1] < 0:
+            # Halt if the router signals convergence.  Halt is the
+            # positive class (label 1), so a positive logit halts.
+            if router_logits[:, -1] > 0:
                 break
 
         return reasoning_steps
