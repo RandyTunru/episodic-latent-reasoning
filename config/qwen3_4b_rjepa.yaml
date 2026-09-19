@@ -15,6 +15,7 @@ predictor_num_layers: 18
 predictor_max_seq_len: 512
 
 router_alpha: 0.2
+router_halt_weight: 1.0
 
 # Encoder
 encoder_hidden_size: 2560
@@ -25,6 +26,7 @@ encoder_pooling: "eos"
 batch_size: 16
 gradient_accumulation_steps: 1
 learning_rate: 5.0e-4
+learning_rate_cycle: 1 # Equal to standard cosine annealing
 weight_decay: 0.01
 warmup_steps: 1000
 max_steps: 100000 # 173k rows : 16 = 10812 steps per epoch, 100k steps = 9.25 epochs
@@ -32,6 +34,10 @@ max_steps: 100000 # 173k rows : 16 = 10812 steps per epoch, 100k steps = 9.25 ep
 # Logging
 log_every: 100
 save_every: 10000
+
+# Evaluation (held-out split: last `val_per_bucket` rows of each length bucket)
+eval_every: 5000
+val_per_bucket: 16
 
 wandb_dir : "logs"
 checkpoint_dir : "artifacts/checkpoints/qwen3_4b_rjepa_openr1_science_01"
