@@ -19,6 +19,7 @@ Run (WANDB_MODE=disabled to skip logging):
 import argparse
 import sys
 import yaml
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -38,6 +39,7 @@ from src.data.helper.sampler import BucketedBatchSampler
 from src.data.precomputed_dataset import PrecomputedReasoningDataset
 from src.models.r_jepa.r_jepa import CausalRJEPA, CrossRJEPA
 from src.trainer.r_jepa.r_jepa_trainer import Trainer
+from tools.telegram_service import send_bot_message
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -203,6 +205,7 @@ def main() -> None:
     )
 
     trainer = Trainer(model, train_loader, val_loader, optimizer, config, device, start_step=start_step)
+    t_start = time.time()
     final_step = trainer.train()
 
     if config.get("save_final_checkpoint", True) and final_step % config.get("save_every", 5000) != 0:
@@ -210,6 +213,16 @@ def main() -> None:
         trainer.save_checkpoint(final_step)
 
     wandb.finish()
+
+    text = (
+        "Training finished: \n"
+        f"Project: {config['project_name']}, Run: {config['run_name']}\n"
+        f"Elapsed: {(time.time() - t_start):.0f}s, Steps: {final_step}\n"
+        f"Ctx: {config['ctx_dir']}, Targets: {config['targets_dir']}\n"
+        f"Model variant: {'CrossAttention' if config['cross_attention'] else 'CausalAttention'}\n"
+        f"Checkpoint dir: {config['checkpoint_dir']}\n"
+    )
+    send_bot_message(text)
 
 if __name__ == "__main__":
     main()

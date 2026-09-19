@@ -76,6 +76,8 @@ from src.data.helper.collate import pad_collate
 from src.data.openr1_reasoning_dataset import ReasoningDataset
 from src.data.helper.precomputed import SCHEMAS, validate_parquet
 
+from tools.telegram_service import send_bot_message
+
 
 # ----------------------------------------------------------------------
 # Distributed setup
@@ -455,6 +457,14 @@ def main() -> None:
             )
         dist.destroy_process_group()
 
+    text = (
+        "Precompute finished: \n"
+        f"Dataset: {args.dataset_id}/{args.subset}/{args.split}\n"
+        f"Branch: {args.branch}, Model: {args.model_id}\n"
+        f"Elapsed: {elapsed:.0f}s, Tokens/s: {tps:,.0f}\n"
+        f"Output: {out_dir}"
+    )
+    send_bot_message(text)
 
 if __name__ == "__main__":
     main()
