@@ -205,10 +205,11 @@ def main() -> None:
     trainer = Trainer(model, train_loader, val_loader, optimizer, config, device, start_step=start_step)
     final_step = trainer.train()
 
-    trainer.save_checkpoint(final_step)
+    if config.get("save_final_checkpoint", True) and final_step % config.get("save_every", 5000) != 0:
+        # Do a final checkpoint save if requested and the last step was not already a save step.
+        trainer.save_checkpoint(final_step)
 
     wandb.finish()
-
 
 if __name__ == "__main__":
     main()

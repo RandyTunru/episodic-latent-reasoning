@@ -80,7 +80,16 @@ class Trainer:
         print("Starting R-JEPA training loop …")
         self.monitor.start()
 
+        # Loop locals referenced by the post-loop validation block.
+        # Initialized so a no-op resume (start_step == max_steps) or a
+        # run shorter than log_every cannot hit unbound names.
+        accum_loss = regression_loss = router_bce = lr = tps = 0.0
+
         while step < self.config["max_steps"]:
+            # Increment step at the start so that the first step is 1, not 0.  
+            # This makes the step count match the checkpoint name and the logged step in wandb.
+            # As well getting a non-zero step for the LR schedule avoids a 0.0 LR at step 0 when warmup_steps > 0.
+            step += 1 
             # ---- LR schedule ----
             lr = scheduler.get_lr(step)
             for pg in self.optimizer.param_groups:
@@ -96,9 +105,9 @@ class Trainer:
                 except StopIteration:
                     if self.config['no_epochs']:
                         print("Dataset exhausted. Stopping training.")
-                        metrics = self._validate(step, ctx)
-                        wandb.log({**metrics, "step": step})
-                        return step
+                        metrics = self._validate(step - 1, ctx)
+                        wandb.log({**metrics, "step": step - 1})
+                        return step - 1 # Return the last step that was actually trained, not the one that would have been next.
                     data_iter = iter(self.train_dataloader)
                     batch = next(data_iter)
 
@@ -151,22 +160,21 @@ class Trainer:
             if step > 0 and step % self.config.get("save_every", 5000) == 0:
                 self.save_checkpoint(step)
 
-            step += 1
-
-        # Final validation if the cadence missed the last step.
-        # step - 1 is the last step that was actually trained, so we validate on that.
-        # using step here would make the validation metric skip the last step if max_steps is not a multiple of eval_every.
-        # as it would be 1 short during the last iteration of the loop, and then incremented to max_steps, which would skip the validation here.
-        if step > 0 and (step - 1) % self.eval_every != 0:
-            metrics = self._validate(step - 1, ctx)
+        # Final validation if the cadence missed the last step.  After a
+        # normal exit step IS the last step that was actually trained
+        # (the increment happens at the top of the loop), so validate on
+        # that.  The step > start_step guard skips this block when
+        # resuming from a completed run, where the loop never executed.
+        if step > self.start_step and step % self.eval_every != 0:
+            metrics = self._validate(step, ctx)
             wandb.log({
-                **metrics, 
+                **metrics,
                 "train/loss": accum_loss,
                 "train/regression_loss": regression_loss,
                 "train/router_bce": router_bce,
                 "train/learning_rate": lr,
                 "metrics/throughput_tps": tps,
-                "step": step - 1
+                "step": step
             })
 
         return step
