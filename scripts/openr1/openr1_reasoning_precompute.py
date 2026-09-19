@@ -77,6 +77,7 @@ from src.data.openr1_reasoning_dataset import ReasoningDataset
 from src.data.helper.precomputed import SCHEMAS, validate_parquet
 
 from tools.telegram_service import send_bot_message
+from tools.on_error import format_error
 
 
 # ----------------------------------------------------------------------
@@ -247,9 +248,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-
+def main(args) -> None:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("LOCAL_RANK", "0"))
     distributed = world_size > 1
@@ -467,4 +466,17 @@ def main() -> None:
     send_bot_message(text)
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+
+    try: 
+        main(args)
+    except Exception as e:
+        err_msg = format_error(e)
+        text = (
+            "Precompute failed: \n"
+            f"Dataset: {args.dataset_id}/{args.subset}/{args.split}\n"
+            f"Branch: {args.branch}, Model: {args.model_id}\n\n"
+            f"Details:\n{err_msg}"
+        )
+        send_bot_message(text)
+        raise

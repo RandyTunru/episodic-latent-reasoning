@@ -39,7 +39,9 @@ from src.data.helper.sampler import BucketedBatchSampler
 from src.data.precomputed_dataset import PrecomputedReasoningDataset
 from src.models.r_jepa.r_jepa import CausalRJEPA, CrossRJEPA
 from src.trainer.r_jepa.r_jepa_trainer import Trainer
+
 from tools.telegram_service import send_bot_message
+from tools.on_error import format_error
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -79,12 +81,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-
-    with open(args.config, "r") as f:
-        config = yaml.safe_load(f)
-
+def main(config) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ---- data: joined branches + length-bucketed batch sampling ----
@@ -217,12 +214,29 @@ def main() -> None:
     text = (
         "Training finished: \n"
         f"Project: {config['project_name']}, Run: {config['run_name']}\n"
-        f"Elapsed: {(time.time() - t_start):.0f}s, Steps: {final_step}\n"
         f"Ctx: {config['ctx_dir']}, Targets: {config['targets_dir']}\n"
         f"Model variant: {'CrossAttention' if config['cross_attention'] else 'CausalAttention'}\n"
+        f"Elapsed: {(time.time() - t_start):.0f}s, Steps: {final_step}\n"
         f"Checkpoint dir: {config['checkpoint_dir']}\n"
     )
     send_bot_message(text)
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()    
+
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)
+
+    try:
+        main(config)
+    except Exception as e:
+        err_msg = format_error(e)
+        text = (
+            f"Training failed: {e}\n"
+            f"Project: {config['project_name']}, Run: {config['run_name']}\n"
+            f"Ctx: {config['ctx_dir']}, Targets: {config['targets_dir']}\n"
+            f"Model variant: {'CrossAttention' if config['cross_attention'] else 'CausalAttention'}\n"
+            f"Details:\n{err_msg}"
+        )
+        send_bot_message(text)
+        raise
