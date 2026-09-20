@@ -3,8 +3,8 @@ run_name: "qwen-3-llm.4b-rjepa-openr1-science-01"
 run_id: "xdc9p50s"
 
 # Data
-ctx_dir: "data/openr1_science_precompute/ctx/Qwen_Qwen3-4B"
-targets_dir: "data/openr1_science_precompute/targets/Qwen_Qwen3-Embedding-4B"
+ctx_dir: "data/openr1_all_precompute/ctx/Qwen_Qwen3-4B"
+targets_dir: "data/openr1_all_precompute/targets/Qwen_Qwen3-Embedding-4B"
 
 # Predictor
 cross_attention: false
@@ -14,7 +14,9 @@ predictor_d_ff: 4096
 predictor_num_layers: 18
 predictor_max_seq_len: 512
 
+# Router
 router_alpha: 0.2
+router_halt_weight: 14 # Ratio of the halt to continue is rouggly 1:200, used sqrt(200) = 14.14, so we set it to 14.0
 
 # Encoder
 encoder_hidden_size: 2560
@@ -26,12 +28,16 @@ batch_size: 16
 gradient_accumulation_steps: 1
 learning_rate: 5.0e-4
 weight_decay: 0.01
-warmup_steps: 1000
-max_steps: 100000 # 173k rows : 16 = 10812 steps per epoch, 100k steps = 9.25 epochs
+max_steps: 440000 # 350k rows : 16 = 21875 steps per epoch, 440000 steps = 20.1 epochs roughly
+warmup_steps: 4400
 
 # Logging
 log_every: 100
-save_every: 10000
+save_every: 110000 # Save every 5 epochs, roughly 110k steps
+
+# Evaluation (held-out split: last `val_per_bucket` rows of each length bucket)
+eval_every: 22000 # Evaluate every 1 epoch, roughly 22k steps
+val_per_bucket: 16
 
 wandb_dir : "logs"
 checkpoint_dir : "artifacts/checkpoints/qwen3_llm_4b_rjepa_openr1_science_01"
