@@ -232,10 +232,10 @@ if __name__ == "__main__":
     except Exception as e:
         err_msg = format_error(e)
         text = (
-            f"Training failed: {e}\n"
-            f"Project: {config['project_name']}, Run: {config['run_name']}\n"
-            f"Ctx: {config['ctx_dir']}, Targets: {config['targets_dir']}\n"
-            f"Model variant: {'CrossAttention' if config['cross_attention'] else 'CausalAttention'}\n"
+            "Training failed:\n"
+            f"Project: {config.get('project_name', '?')}, Run: {config.get('run_name', '?')}\n"
+            f"Ctx: {config.get('ctx_dir', '?')}, Targets: {config.get('targets_dir', '?')}\n"
+            f"Model variant: {'CrossAttention' if config.get('cross_attention') else 'CausalAttention'}\n"
             f"Details:\n{err_msg}"
         )
         send_bot_message(text)
