@@ -29,6 +29,7 @@ import wandb
 
 from src.utils.metrics import ThroughputMonitor
 from src.trainer.modules.lr_scheduler import LRScheduler
+from src.trainer.modules.wd_scheduler import WDScheduler
 
 
 class Trainer:
@@ -73,7 +74,8 @@ class Trainer:
             device_type=self.device.type, dtype=torch.bfloat16, enabled=use_amp,
         )
 
-        scheduler = LRScheduler(self.config)
+        lr_scheduler = LRScheduler(self.config)
+        wd_scheduler = WDScheduler(self.config)
 
         data_iter = iter(self.train_dataloader)
 
@@ -90,10 +92,15 @@ class Trainer:
             # This makes the step count match the checkpoint name and the logged step in wandb.
             # As well getting a non-zero step for the LR schedule avoids a 0.0 LR at step 0 when warmup_steps > 0.
             step += 1 
-            # ---- LR schedule ----
-            lr = scheduler.get_lr(step)
+
+            # --- Schedulers ----
+            lr = lr_scheduler.get_lr(step)
+            wd = wd_scheduler.get_weight_decay(step)
+
             for pg in self.optimizer.param_groups:
                 pg["lr"] = lr
+                if wd is not None and pg['weight_decay'] != 0:
+                    pg["weight_decay"] = wd
 
             self.optimizer.zero_grad(set_to_none=True)
             accum_loss = 0.0

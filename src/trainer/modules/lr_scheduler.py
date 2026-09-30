@@ -8,7 +8,8 @@ class LRScheduler:
     def _get_cosine_lr(self, step: int) -> float:
         """Cosine learning-rate schedule with linear warmup."""
         max_lr = self.config["learning_rate"]
-        min_lr = max_lr * self.config.get("min_lr_alpha", 0.1)
+        min_lr = max_lr * self.config.get("min_lr_ratio", 0.1)
+        start_lr = self.config.get("start_lr", 0.0)
         warmup_steps = self.config.get("warmup_steps", 1000)
         total_steps = self.config["max_steps"]
 
@@ -18,7 +19,7 @@ class LRScheduler:
 
         # Linear warmup
         if step < warmup_steps:
-            return max_lr * (step / max(warmup_steps, 1))
+            return start_lr + (max_lr - start_lr) * (step / max(warmup_steps, 1))
 
         # Beyond total steps
         if step >= total_steps:
