@@ -136,6 +136,17 @@ class PrecomputedReasoningDataset(Dataset):
         # decoding.  num_steps (X) stays in the column untouched as the
         # router's halt signal.
         stored_by_key = dict(zip(tgt_keys, tgt_cols["num_steps_stored"].tolist()))
+        # Drop samples with no stored steps: their step_targets blob is
+        # empty, which torch.frombuffer refuses (and a zero-step episode
+        # has no halt position for the router loss anyway).  Such rows
+        # appear when the generator produced no reasoning steps.
+        n_all = len(self.keys)
+        self.keys = [k for k in self.keys if stored_by_key[k] > 0]
+        if len(self.keys) < n_all:
+            print(
+                f"PrecomputedReasoningDataset: dropped {n_all - len(self.keys)} "
+                f"of {n_all} samples with num_steps_stored == 0"
+            )
         ctx_lens = np.array([ctx_len_by_key[k] for k in self.keys], dtype=np.int64)
         num_steps_arr = np.array(
             [stored_by_key[k] for k in self.keys], dtype=np.int64
