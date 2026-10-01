@@ -1,0 +1,54 @@
+project_name: "qwen-3.4b-rjepa-openr1"
+run_name: "qwen-3-llm-4b-rjepa-openr1-all-01"
+
+# Data
+ctx_dir: "/data/episodic-latent-reasoning/data/openr1_all_precomputed/ctx/Qwen_Qwen3-4B"
+targets_dir: "/data/episodic-latent-reasoning/data/openr1_all_precomputed/targets/Qwen_Qwen3-Embedding-4B"
+
+# Predictor
+cross_attention: false
+predictor_hidden_size: 1280
+predictor_num_heads: 16
+predictor_d_ff: 4096
+predictor_num_layers: 18
+predictor_max_seq_len: 512
+
+# Router
+router_alpha: 0.2
+router_halt_weight: 14 # Ratio of the halt to continue is roughly 1:200, used sqrt(200) = 14.14, so we set it to 14.0
+
+# Encoder
+encoder_hidden_size: 2560
+encoder_max_seq_len: 2048
+encoder_pooling: "eos"
+
+# Optimization
+batch_size: 8
+gradient_accumulation_steps: 8 # Effective batch size = 8 * 8 = 64
+learning_rate: 5.0e-4
+start_lr: 5.0e-5 # 10% of the base learning rate
+min_lr_ratio: 0.01 # 1% of the base learning rate
+weight_decay: 0.05
+weight_decay_end: 0.4 # Ramp up to 10x
+max_steps: 275000 # 350k rows : 64 = 5500 steps per epoch, 275000 steps = 50 epochs roughly  
+warmup_steps: 13750 #  Warmup for 5% of the total steps (13750 / 275000 = 0.05)
+
+# Logging
+log_every: 100
+save_every: 5500 # Save every 5 epochs, roughly 27500 steps
+
+# Evaluation (held-out split: last `val_per_bucket` rows of each length bucket)
+eval_every: 5500 # Evaluate every 1 epoch, roughly 5500 steps
+val_per_bucket: 16
+
+wandb_dir : "logs"
+checkpoint_dir : "artifacts/checkpoints/qwen3_llm_4b_rjepa_openr1_all_01"
+
+# Checkpoint loading
+from_checkpoint: null
+is_resume: false
+
+# Miscellaneous
+num_workers: 16
+prefetch_factor: 4
+no_epochs: false
