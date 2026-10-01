@@ -134,11 +134,13 @@ def main(config) -> None:
     train_loader = DataLoader(
         training_dataset, batch_sampler=train_sampler, collate_fn=collate_fn,
         num_workers=config["num_workers"],
+        persistent_workers=True, pin_memory=True, prefetch_factor=config.get("prefetch_factor", 2)
     )
 
     val_loader = DataLoader(
         validation_dataset, batch_sampler=val_sampler, collate_fn=collate_fn,
         num_workers=config["num_workers"],
+        persistent_workers=True, pin_memory=True, prefetch_factor=config.get("prefetch_factor", 2)
     )
 
     # ---- model: predictor only, no encoder resident ----
