@@ -260,6 +260,14 @@ class Trainer:
 
         self.model.train()
 
+        # Val batches are length-bucketed, so each batch's padded step
+        # axis is its own batch max (117 vs 6 in the crash = two buckets).
+        # Pad every batch to the global max before stacking; padding
+        # columns carry valid=False and are masked out of the halt logic
+        # and per-position metrics below.
+        max_S = max(t.shape[1] for t in logits_list)
+        logits_list = [F.pad(t, (0, max_S - t.shape[1])) for t in logits_list]
+        valid_list = [F.pad(t, (0, max_S - t.shape[1])) for t in valid_list]
         logits = torch.cat(logits_list)      # (N, S)
         valid = torch.cat(valid_list).bool() # (N, S)
         ns = torch.cat(ns_list)              # (N,)
@@ -290,18 +298,18 @@ class Trainer:
         }
 
         if n_visible > 0:
-            metrics["val/halt_rate"] = n_halted / n_visible
+            metrics["val/halt_rate"] = n_halted / n_visible # fraction of visible-end rows that halted, higher is better (the router should halt when the true end is inside the window)
             if n_halted > 0:
                 offset = (pred_halt - true_halt)[eval_halt].float()
-                metrics["val/signed_mean_offset"] = offset.mean().item()
-                metrics["val/abs_mean_offset"] = offset.abs().mean().item()
-                metrics["val/median_offset"] = offset.median().item()
-                metrics["val/exact_halt"] = (offset == 0).float().mean().item()
-                metrics["val/within_1"] = (offset.abs() <= 1).float().mean().item()
+                metrics["val/signed_mean_offset"] = offset.mean().item() # negative = early, positive = late. Close to 0 is best, but the sign matters more than the magnitude here, since early halts truncate reasoning the answer needs while late halts only cost cheap predictor steps.
+                metrics["val/abs_mean_offset"] = offset.abs().mean().item() # absolute value of the mean offset, lower is better. no sign information
+                metrics["val/median_offset"] = offset.median().item() # median offset, lower is better. no sign information
+                metrics["val/exact_halt"] = (offset == 0).float().mean().item() # fraction of visible-end rows that halted exactly at the true end, higher is better
+                metrics["val/within_1"] = (offset.abs() <= 1).float().mean().item() # fraction of visible-end rows that halted within 1 step (both early and late) of the true end, higher is better
 
         n_cut = int(cut.sum())
         if n_cut > 0:
-            metrics["val/false_halt_rate"] = (cut & did_halt).sum().item() / n_cut
+            metrics["val/false_halt_rate"] = (cut & did_halt).sum().item() / n_cut # fraction of cut rows that halted, lower is better (the router should not halt when the true end is beyond the window)
 
         # Per-position halt classification (halt = positive class).
         halt_pos = torch.zeros_like(valid)
