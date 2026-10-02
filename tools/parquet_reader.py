@@ -28,7 +28,7 @@ def handle_numpy(obj):
     else:
         raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
-def sample_to_jsonl(out_dir, sample: dict) -> dict:
+def sample_to_jsonl(out_dir, file_name, sample: dict) -> dict:
     """Convert a sample dictionary to a JSON-serializable format.
 
     Args:
@@ -37,7 +37,7 @@ def sample_to_jsonl(out_dir, sample: dict) -> dict:
     Returns:
         dict: A JSON-serializable dictionary.
     """
-    out_dir = out_dir / "samples.jsonl"
+    out_dir = out_dir / f"{file_name}.jsonl"
 
     with open(out_dir, 'a') as f:
         for row in sample.to_dict(orient='records'):
@@ -47,15 +47,24 @@ def sample_to_jsonl(out_dir, sample: dict) -> dict:
 
 if __name__ == "__main__":
     import sys
+    import argparse
     from pathlib import Path
 
-    if len(sys.argv) != 2:
-        print("Usage: python parquet_reader.py <parquet_file_path>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Convert a Parquet file to JSONL format.")
+    parser.add_argument("parquet_file_path", type=str, help="Path to the Parquet file to convert.")
+    parser.add_argument("--output-dir", type=str, default=None, help="Directory to save the JSONL output.")
+    parser.add_argument("--num-samples", type=int, default=None, help="Number of samples to read from the Parquet file.")
 
-    parquet_file_path = sys.argv[1]
+    args = parser.parse_args()
+
+    parquet_file_path = args.parquet_file_path
+    parquet_file_name = Path(parquet_file_path).name.rstrip(".parquet")
+
     df = read_parquet_file(parquet_file_path)
 
-    output = sample_to_jsonl(Path(parquet_file_path).parent, df)
+    if args.num_samples is not None:
+        df = df.head(args.num_samples)
+
+    output = sample_to_jsonl(Path(args.output_dir) if args.output_dir else Path(parquet_file_path).parent, parquet_file_name, df)
 
     print(f"Converted Parquet file to JSONL and saved to: {output}")
