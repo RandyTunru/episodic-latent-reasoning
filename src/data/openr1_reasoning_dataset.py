@@ -149,3 +149,72 @@ class ReasoningDataset(Dataset):
             "num_steps": len(step_ids),
             "cot_text": cot_text,
         }
+
+class RewrittenReasoningDataset(ReasoningDataset):
+    """Like ReasoningDataset, but uses rewritten CoT text instead of the original.
+
+    This dataset is designed for use with rewritten chain-of-thoughts (CoTs)
+    that have been improved for clarity, coherence, and logical flow.  It
+    inherits from ReasoningDataset and overrides the CoT extraction to use
+    the rewritten text instead of the original response.
+
+    Each sample returns:
+        ctx_ids:            token IDs for the instruction
+        ctx_mask:           bool mask (True = valid token)
+        step_ids:           list of tensors, one per reasoning step
+        step_masks:         list of bool masks, one per reasoning step
+        num_steps:          number of reasoning steps
+        cot_text:           the rewritten CoT text
+        orig_row_id:        original dataset row index (all rewrite
+                            variants of one sample share it; the precompute
+                            rebuilds the join key from it)
+        cot_variant:        0-indexed rewrite variant (0 .. n_rewrite-1)
+    """
+
+    def __init__(
+        self,
+        data: List[Dict[str, Any]],
+        tokenizer,
+        conversation_key: str = "messages",
+        cot_key: str = "cot_text",
+        max_ctx_token_length: int = 512,
+        max_step_token_length: int = 256,
+        step_separator: Optional[str] = None,
+    ):
+        super().__init__(
+            data=data,
+            tokenizer=tokenizer,
+            conversation_key=conversation_key,
+            max_ctx_token_length=max_ctx_token_length,
+            max_step_token_length=max_step_token_length,
+            step_separator=step_separator,
+        )
+        self.cot_key = cot_key
+
+    def __getitem__(self, idx):
+        example = self.data[idx]
+        messages = example[self.conversation_key]
+
+        instruction = messages[0]["content"]
+        cot_text = example.get(self.cot_key, "").strip()
+
+        ctx_ids, ctx_mask = self._tokenize(instruction, max_length=self.max_ctx_token_length)
+
+        steps = self._parse_steps(cot_text) if cot_text else []
+
+        step_ids, step_masks = [], []
+        for step in steps:
+            ids, mask = self._tokenize(step, max_length=self.max_step_token_length)
+            step_ids.append(ids)
+            step_masks.append(mask)
+
+        return {
+            "ctx_ids": ctx_ids,
+            "ctx_mask": ctx_mask,
+            "step_ids": step_ids,
+            "step_masks": step_masks,
+            "num_steps": len(step_ids),
+            "cot_text": cot_text,
+            "orig_row_id": int(example["orig_row_id"]),
+            "cot_variant": int(example["cot_variant"]),
+        }
