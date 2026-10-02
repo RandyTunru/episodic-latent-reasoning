@@ -147,4 +147,5 @@ class ReasoningDataset(Dataset):
             "step_ids": step_ids,
             "step_masks": step_masks,
             "num_steps": len(step_ids),
+            "cot_text": cot_text,
         }
