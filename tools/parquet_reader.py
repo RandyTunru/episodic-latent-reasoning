@@ -40,6 +40,8 @@ def sample_to_jsonl(out_dir, file_name, sample: dict) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir = out_dir / f"{file_name}.jsonl"
 
+    out_dir.unlink(missing_ok=True)  # Remove existing file if it exists
+
     with open(out_dir, 'a') as f:
         for row in sample.to_dict(orient='records'):
             f.write(json.dumps(row, default=handle_numpy) + '\n')
