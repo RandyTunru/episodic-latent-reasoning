@@ -84,48 +84,25 @@ CLIENT = VLLMClient(
     retries=MAX_RETRIES,
 )
 
-REWRITE_PROMPT = """### Instruction:
-You are given a chain-of-thought (CoT) reasoning text extracted from a model response. Rewrite it into a compact, ordered sequence of discrete reasoning steps.
+REWRITE_PROMPT = """You are given a chain-of-thought (CoT) reasoning text extracted from a model response. Rewrite it into a compact, ordered sequence of discrete reasoning steps.
 
-### Instructions:
-1. Understand the original CoT and its reasoning flow.
-2. Each step should be a complete sentence, clearly stating a single reasoning point.
-3. No need to preserve the original wording; focus on clarity and conciseness.
-4. Do not include any meta-thoughts or commentary; only the reasoning steps matter.
-5. Ensure you follow the dynamics of the original reasoning, if it involves a change of viewpoint, a new assumption, or a new line of reasoning, reflect that in the step sequence.
-6. For steps that involves sequential steps ensure that the order is preserved. 
+Write one reasoning step per paragraph. A step is a complete sentence (or a short group of closely related sentences) that states a single reasoning point. Separate consecutive steps with exactly ONE empty line. Do not number the steps, do not use bullets or letter labels, and do not add headings. Write the steps directly, one after another, separated only by empty lines. Use real line breaks - never write the two-character text backslash n anywhere in your output.
 
-### Special Case and Formatting Rules:
-Never write numbered steps or bullet points as a single list within a single paragraph. 
-Here is an example of what NOT to do:
-"
-To implement this:
-1. Split the input string into $S$ and $T$.
-2. Construct the string $T + \# + S$.
-3. Compute the prefix function for this concatenated string.
-4. Initialize a DP array $dp$ of size $m+1$ with $dp[0] = 1$.
-5. For each $i$ from 1 to $m$:
-   - Retrieve the prefix function value at the corresponding position in the concatenated string.
-   - Traverse the failure function chain to find all valid $l$.
-   - For each valid $l$, update $dp[i] += dp[i-l]$.
-6. Output $dp[m]$.
-"
-Instead, rewrite each component as its own separate step with a double newline character ("\\n\\n").
+Example of the required format:
 
-### Rules:
-1. Preserve the original reasoning steps and conclusions. Do not fix, correct, or improve the reasoning itself.
-2. Remove verbosity, repetition, rambling, and filler. Merge steps that restate the same operation.
-3. Avoid introducing new information or changing the original meaning.
-4. Use clear and concise language, and ensure that the reasoning is easy to follow.
-5. Ensure that the rewritten CoT is logically structured and maintains the original intent of the reasoning.
-6. Ensure that every step retains its original detail and information, but is expressed in a clearer and more concise manner.
-7. Separate each reasoning step with a double newline character ("\\n\\n"). Output ONLY the rewritten reasoning - no headers, no commentary, no quotes.
-8. Ensure each rewrite ends with a final conclusion or answer, if present in the original CoT.
-"""
+To verify the divisibility condition, compute n = h / a and check that n is an integer.
+
+Since n must be at least 1, discard the case n = 0.
+
+Apply the congruence n = n0 + t * M for every t that keeps n inside the valid range.
+
+Preservation rules: keep every substantive reasoning operation - deductions, computations, checks, verifications, revisions - and the final conclusion. Do not fix, correct, or improve the reasoning itself. Remove verbosity, repetition, rambling, and filler, and merge steps that restate the same operation. Do not introduce new information or change the original meaning. Follow the dynamics of the original reasoning: if it changes viewpoint, adopts a new assumption, or starts a new line of reasoning, reflect that in the step sequence, and keep sequential dependencies in their original order. If the original CoT ends with a conclusion or answer, make that the last step.
+
+Output ONLY the rewritten reasoning. No headers, no commentary, no quotes."""
 
 
 VARIANT_LINE = (
-    "9. This is variant {variant} of {n} independent rewrites of the same excerpt. "
+    "This is variant {variant} of {n} independent rewrites of the same excerpt. "
     "Choose a different grouping, ordering emphasis, or compression of the steps "
     "than the other variants."
 )
@@ -204,6 +181,36 @@ def _extract_rewrite(content: str) -> str:
     return content.split(CLOSE_THINK_TOKEN)[-1].strip()
 
 
+# List lead-ins the rewriter sometimes emits despite the prompt: "1.",
+# "2)", "- ", "•", "Step 3:", "# Heading".  The trailing whitespace is
+# required so decimal numbers ("3.14") and negative numbers ("-5") at a
+# line start are NOT treated as enumerators.
+_LIST_LEAD_RE = re.compile(
+    r"^(?:\d+[.)]|[-*•]|step\s*\d+\s*[:.]|#+)\s+", re.IGNORECASE,
+)
+
+
+def _sanitize_rewrite(text: str) -> str:
+    """Undo common formatting slips in the rewriter's output.
+
+    Literal backslash-n escapes become real newlines.  If the output is a
+    numbered/bulleted list despite the prompt, the enumerators are
+    stripped and the former items are re-joined with blank lines so the
+    ``\\n\\n+`` step splitter still sees one step per item.
+    """
+    text = text.replace(r"\n\n", "\n\n").replace(r"\n", "\n")
+    lines = text.split("\n")
+    cleaned, had_list = [], False
+    for line in lines:
+        new_line = _LIST_LEAD_RE.sub("", line)
+        had_list = had_list or new_line != line
+        cleaned.append(new_line)
+    if had_list:
+        nonempty = [ln for ln in cleaned if ln.strip()]
+        return "\n\n".join(nonempty).strip()
+    return "\n".join(cleaned).strip()
+
+
 def _prompt(n_rewrite: int, variant: int) -> str:
     if n_rewrite > 1:
         return REWRITE_PROMPT + "\n\n" + VARIANT_LINE.format(
@@ -245,8 +252,9 @@ async def _rewrite_row(
         )
 
         # With thinking enabled the response still contains the rewriter's
-        # <think> block; keep only what follows the closing tag.
-        out_row["cot_text"] = _extract_rewrite(response)
+        # <think> block; keep only what follows the closing tag, then
+        # normalize formatting slips (literal \n escapes, numbered lists).
+        out_row["cot_text"] = _sanitize_rewrite(_extract_rewrite(response))
     except Exception as exc:
         stats["failures"] += 1
         out_row["cot_text"] = ""
