@@ -145,16 +145,32 @@ def parse_args() -> argparse.Namespace:
         help="run the rewriter with vLLM thinking enabled (the rewrite is "
         "taken from after the closing think tag; meta-thoughts are discarded)",
     )
+
     parser.add_argument(
         "--n-rewrite", type=int, default=1,
         help="number of rewrite variants per sample (each variant becomes "
         "its own row with the same orig_row_id)",
     )
     parser.add_argument(
-        "--rows-per-part", type=int, default=100_000,
+        "--rows-per-part", type=int, default=10_000,
         help="row-count shard size: each part file holds a contiguous run "
-        "of this many rows (translates 1-to-1 into a .arrow file later)",
+        "of this many rows (translates 1-to-1 into a .arrow file later). "
+        "Keep this fixed across resume runs of the same output directory - "
+        "the resume offset math assumes the original value.",
     )
+    parser.add_argument(
+        "--start-part", type=int, default=0,
+        help="resume: the part index to start (re)writing at, 0-indexed "
+        "(part-000 is the first part).  Part files from this index onward "
+        "are deleted and rewritten from the part's start (never continued "
+        "mid-part - rows are deterministic via seeds), and the dataset "
+        "prefix the earlier parts cover is skipped.  If the previous run "
+        "crashed mid part N, pass N.  The resume assumes the SAME "
+        "--rows-per-part and --n-rewrite as the original run (they fix "
+        "the part layout); when a previous completed run's meta.json "
+        "exists, mismatches warn.",
+    )
+
     parser.add_argument(
         "--batch-size", type=int, default=128,
         help="rows scheduled per async gather (the semaphore caps actual "
@@ -259,6 +275,16 @@ def _infer_schema(data) -> pa.Schema:
     return pa.unify_schemas([copied_schema, owned_schema])
 
 
+def _delete_parts_from(out_dir: Path, start: int) -> None:
+    """Delete part files from *start* onward.  The resume part is
+    rewritten from its start, never continued mid-part: ParquetWriter
+    appends to existing files, and rows are deterministic via seeds, so
+    rewriting produces exactly what a completed run would have written."""
+    for p in out_dir.glob("part-*.parquet"):
+        if int(p.stem.split("-")[1]) >= start:
+            p.unlink()
+
+
 async def main(args: argparse.Namespace) -> None:
     data = load_dataset(args.dataset_id, args.subset, split=args.split)
     if args.max_samples is not None:
@@ -271,8 +297,57 @@ async def main(args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     schema = _infer_schema(data)
+
+    # Resume: delete part files from the resume point onward (ParquetWriter
+    # appends to existing files) and skip the dataset prefix they cover.
+    # No checks on earlier parts - if a previous run crashed mid part N,
+    # pass --start-part N and the whole part is rewritten from its start.
+    # Output row index = orig_row_id * n_rewrite + cot_variant, so a part
+    # boundary can fall mid-sample; the boundary sample's already-written
+    # variants stay in the previous part and only the remaining variants
+    # are emitted here.
+    resume_part = args.start_part
+    _delete_parts_from(out_dir, resume_part)
+
+    # The resume offset assumes the original part layout: rows_per_part
+    # and n_rewrite must match the run that produced the earlier parts.
+    # Cross-check against the last completed run's meta.json when present
+    # (best effort - a crashed run may never have written one).
+    if resume_part > 0:
+        prev_meta = out_dir / "meta.json"
+        if prev_meta.exists():
+            prev = json.loads(prev_meta.read_text())
+            mismatches = [
+                f"{key}: previous={prev.get(key)}, resume={getattr(args, key)}"
+                for key in ("rows_per_part", "n_rewrite")
+                if prev.get(key) is not None and prev.get(key) != getattr(args, key)
+            ]
+            if mismatches:
+                print(
+                    "WARNING: resume settings differ from the existing "
+                    "meta.json - the part layout/offset math assumes the "
+                    "original values (" + "; ".join(mismatches) + ")",
+                    flush=True,
+                )
+    offset_rows = resume_part * args.rows_per_part
+    first_sample = offset_rows // args.n_rewrite
+    first_variant = offset_rows % args.n_rewrite
+    n_original_total = n_original
+    if first_sample >= n_original:
+        print(
+            f"--start-part {args.start_part}: all {n_original} samples are "
+            "already covered by existing parts; nothing to do",
+            flush=True,
+        )
+        await CLIENT.aclose()
+        return
+    if first_sample > 0:
+        data = data.select(range(first_sample, n_original))
+        n_original = len(data)
+
     failures_path = out_dir / "failures.jsonl"
-    failures_path.unlink(missing_ok=True)
+    if args.start_part == 0:
+        failures_path.unlink(missing_ok=True)
 
     # Every configured server must be reachable and serve the same model
     # before any rewrite is spent (this also catches a wrong second URL).
@@ -283,7 +358,7 @@ async def main(args: argparse.Namespace) -> None:
 
     # Row-count sharded writers: each part holds a contiguous run of
     # rows, closed and rotated at the shard boundary.
-    part_idx, part_rows, written = 0, 0, 0
+    part_idx, part_rows, written = resume_part, 0, 0
     writer = pq.ParquetWriter(out_dir / f"part-{part_idx:03d}.parquet", schema)
     pending = []
 
@@ -313,10 +388,14 @@ async def main(args: argparse.Namespace) -> None:
             batch_start = batch_idx * args.batch_size
             jobs = []
             for j in range(len(batch["messages"])):
-                orig_row_id = batch_start + j
+                orig_row_id = first_sample + batch_start + j
                 row = {k: batch[k][j] for k in batch}
                 cot_text = _extract_cot(row["messages"][1]["content"])
-                for variant in range(args.n_rewrite):
+                # The very first sample of a resume can straddle the part
+                # boundary: its earlier variants were already written to
+                # the previous part, so only the remaining ones are emitted.
+                start_variant = first_variant if batch_idx == 0 and j == 0 else 0
+                for variant in range(start_variant, args.n_rewrite):
                     jobs.append(_rewrite_row(
                         orig_row_id, variant,
                         cot_text, row, args.n_rewrite, args.thinking,
@@ -343,8 +422,9 @@ async def main(args: argparse.Namespace) -> None:
         "max_concurrent": MAX_CONCURRENT,
         "max_retries": MAX_RETRIES,
         "rows_per_part": args.rows_per_part,
-        "original_rows": n_original,
-        "total_rows": n_original * args.n_rewrite,
+        "start_part": resume_part,
+        "original_rows": n_original_total,
+        "total_rows": n_original_total * args.n_rewrite,
         "empty_cot_rows": stats["empty_originals"],
         "failed_rows": stats["failures"],
         "prompt": REWRITE_PROMPT,
