@@ -94,7 +94,23 @@ You are given a chain-of-thought (CoT) reasoning text extracted from a model res
 4. Do not include any meta-thoughts or commentary; only the reasoning steps matter.
 5. Ensure you follow the dynamics of the original reasoning, if it involves a change of viewpoint, a new assumption, or a new line of reasoning, reflect that in the step sequence.
 6. For steps that involves sequential steps ensure that the order is preserved. 
-7. Do not write numbered steps or bullet points as a single list within a single paragraph. Instead, separate each step with a double newline character ("\\n\\n").
+
+### Special Case and Formatting Rules:
+Never write numbered steps or bullet points as a single list within a single paragraph. 
+Here is an example of what NOT to do:
+"
+To implement this:
+1. Split the input string into $S$ and $T$.
+2. Construct the string $T + \# + S$.
+3. Compute the prefix function for this concatenated string.
+4. Initialize a DP array $dp$ of size $m+1$ with $dp[0] = 1$.
+5. For each $i$ from 1 to $m$:
+   - Retrieve the prefix function value at the corresponding position in the concatenated string.
+   - Traverse the failure function chain to find all valid $l$.
+   - For each valid $l$, update $dp[i] += dp[i-l]$.
+6. Output $dp[m]$.
+"
+Instead, rewrite each component as its own separate step with a double newline character ("\\n\\n").
 
 ### Rules:
 1. Preserve the original reasoning steps and conclusions. Do not fix, correct, or improve the reasoning itself.
