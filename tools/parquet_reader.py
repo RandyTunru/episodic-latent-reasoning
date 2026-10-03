@@ -37,6 +37,7 @@ def sample_to_jsonl(out_dir, file_name, sample: dict) -> dict:
     Returns:
         dict: A JSON-serializable dictionary.
     """
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_dir = out_dir / f"{file_name}.jsonl"
 
     with open(out_dir, 'a') as f:
