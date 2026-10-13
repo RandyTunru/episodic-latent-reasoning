@@ -73,7 +73,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.helper.collate import pad_collate
-from src.data.openr1_reasoning_dataset import ReasoningDataset
+from src.data.openr1_reasoning_dataset import ReasoningDataset, RewrittenReasoningDataset
 from src.data.helper.precomputed import SCHEMAS, validate_parquet
 
 from tools.telegram_service import send_bot_message
@@ -149,13 +149,16 @@ def pool_steps(hidden: torch.Tensor, mask: torch.Tensor, mode: str) -> torch.Ten
     raise ValueError(f"unsupported pooling mode: {mode}")
 
 
-def bucket_order(data, branch: str, step_separator: str):
+def bucket_order(data, branch: str, step_separator: str, cot_key: str = None):
     """Sort sample indices to minimize padding waste for this branch.
 
     ``targets`` sorts by (num steps, longest step) - the two axes the
     collate pads.  ``ctx`` sorts by instruction length.  Rows need not be
     ordered the same across branches: the training loader joins on
     ``sample_index``, so each branch optimizes its own batching.
+
+    ``cot_key`` selects the rewritten CoT column (rewritten mode); by
+    default the CoT is extracted from the model response's think block.
     """
     if branch == "ctx":
         keys = [len(row["messages"][0]["content"]) for row in data]
@@ -163,9 +166,12 @@ def bucket_order(data, branch: str, step_separator: str):
         pattern = re.compile(re.escape("<think>") + r"(.*?)" + re.escape("</think>"), re.DOTALL)
         keys = []
         for row in data:
-            response = row["messages"][1]["content"]
-            match = pattern.search(response)
-            cot = match.group(1).strip() if match else response.strip()
+            if cot_key is not None:
+                cot = row.get(cot_key) or ""
+            else:
+                response = row["messages"][1]["content"]
+                match = pattern.search(response)
+                cot = match.group(1).strip() if match else response.strip()
             steps = [s.strip() for s in re.split(step_separator, cot) if s.strip()]
             # Primary: number of steps (steps-axis padding).  Secondary:
             # longest step (token-axis padding - the collate pads every
@@ -241,6 +247,19 @@ def parse_args() -> argparse.Namespace:
         "(defaults to WORLD_SIZE; only needed with --only-rank)",
     )
     parser.add_argument(
+        "--cot-source", choices=["response", "rewritten"], default="response",
+        help="'response': extract the CoT from the model response (default). "
+        "'rewritten': read the CoT from the 'cot_text' column of a local "
+        "parquet directory produced by openr1_rewrite_cot.py; the join key "
+        "becomes orig_row_id * n_rewrite + cot_variant (both branches), and "
+        "--dataset-id/--subset/--split are ignored",
+    )
+    parser.add_argument(
+        "--rewritten-dir", default=None,
+        help="path to the rewritten parquet directory (with its meta.json); "
+        "required with --cot-source rewritten",
+    )
+    parser.add_argument(
         "--output-dir",
         default=str(REPO_ROOT / "data" / "openr1_science_precompute"),
         help="part files are written to <output_dir>/<branch>/",
@@ -263,24 +282,58 @@ def main(args) -> None:
 
     # ---- dataset: tokenized per-sample, sharded per rank ----
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
-    data = load_dataset(args.dataset_id, args.subset, split=args.split)
-    if args.max_samples is not None:
-        data = data.select(range(min(args.max_samples, len(data))))
 
-    dataset = ReasoningDataset(
-        data,
-        tokenizer,
-        max_ctx_token_length=args.max_ctx_tokens,
-        max_step_token_length=args.max_step_tokens,
-        step_separator=args.step_separator,
-    )
+    if args.cot_source == "rewritten":
+        # Local parquet directory written by openr1_rewrite_cot.py.  The
+        # join key is rebuilt from the row metadata so all variants of one
+        # instruction form a contiguous key range (sample_index // n_rewrite
+        # recovers the group in training).  n_rewrite comes from meta.json -
+        # the single source of truth - so the key formula can never drift
+        # from what the rewrite pass actually produced.
+        if args.rewritten_dir is None:
+            raise ValueError("--rewritten-dir is required with --cot-source rewritten")
+        rewritten_dir = Path(args.rewritten_dir)
+        meta_file = rewritten_dir / "meta.json"
+        if not meta_file.exists():
+            raise FileNotFoundError(
+                f"{meta_file} missing - is this a rewritten CoT directory?"
+            )
+        n_rewrite = json.loads(meta_file.read_text())["n_rewrite"]
+        data = load_dataset(
+            "parquet", data_files=str(rewritten_dir / "part-*.parquet"), split="train",
+        )
+        if args.max_samples is not None:
+            data = data.select(range(min(args.max_samples, len(data))))
+        dataset = RewrittenReasoningDataset(
+            data,
+            tokenizer,
+            cot_key="cot_text",
+            max_ctx_token_length=args.max_ctx_tokens,
+            max_step_token_length=args.max_step_tokens,
+            step_separator=args.step_separator,
+        )
+        cot_key = "cot_text"
+    else:
+        n_rewrite = 1
+        cot_key = None
+        data = load_dataset(args.dataset_id, args.subset, split=args.split)
+        if args.max_samples is not None:
+            data = data.select(range(min(args.max_samples, len(data))))
+
+        dataset = ReasoningDataset(
+            data,
+            tokenizer,
+            max_ctx_token_length=args.max_ctx_tokens,
+            max_step_token_length=args.max_step_tokens,
+            step_separator=args.step_separator,
+        )
 
     # Length-bucketed, round-robin shard per rank.  Batches are formed from
     # contiguous runs of the sorted order (homogeneous lengths -> low
     # padding waste) and then distributed round-robin so every rank gets
     # equal shares of the short and long ends (balanced wall time).
     total = len(dataset)
-    order = bucket_order(data, args.branch, args.step_separator)
+    order = bucket_order(data, args.branch, args.step_separator, cot_key=cot_key)
     batches = [order[i : i + args.batch_size] for i in range(0, total, args.batch_size)]
     n_shards = args.num_ranks if args.num_ranks is not None else world_size
     share_rank = rank if args.only_rank is None else args.only_rank
@@ -362,7 +415,15 @@ def main(args) -> None:
 
             # --- slice to unpadded per-sample rows ---
             for i in range(B):
-                sample_index = my_indices[row_offset + i]  # running offset: robust to partial batches
+                if args.cot_source == "rewritten":
+                    # Composite key: all variants of one instruction form a
+                    # contiguous range; training recovers the group via
+                    # sample_index // n_rewrite for the group-aware holdout.
+                    orig_id = int(batch["orig_row_id"][i].item())
+                    variant = int(batch["cot_variant"][i].item())
+                    sample_index = orig_id * n_rewrite + variant
+                else:
+                    sample_index = my_indices[row_offset + i]  # running offset: robust to partial batches
                 if args.branch == "ctx":
                     ctx_len = int(ctx_mask[i].sum().item())
                     rows.append({
@@ -412,6 +473,8 @@ def main(args) -> None:
         "elapsed_s": elapsed,
         "model_id": args.model_id,
         "pooling": args.pooling,
+        "cot_source": args.cot_source,
+        "n_rewrite": n_rewrite,
         "hidden_size": E,
         "dtype": "bfloat16",
         "part_file": str(part_file),
@@ -438,6 +501,8 @@ def main(args) -> None:
                 "dataset": f"{args.dataset_id}/{args.subset}/{args.split}",
                 "model_id": args.model_id,
                 "pooling": args.pooling,
+                "cot_source": args.cot_source,
+                "n_rewrite": n_rewrite,
                 "hidden_size": E,
                 "dtype": "bfloat16",
                 "total_samples": sum(p["samples"] for p in parts),
