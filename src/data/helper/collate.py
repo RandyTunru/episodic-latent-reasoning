@@ -35,6 +35,14 @@ def pad_collate(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
 
     B = len(batch)
 
+    # Optional row-metadata passthrough: rewritten datasets carry
+    # orig_row_id/cot_variant so the precompute can rebuild the composite
+    # sample_index key (orig_row_id * n_rewrite + cot_variant).  Standard
+    # datasets don't have the keys and are unaffected.
+    has_row_meta = all("orig_row_id" in s and "cot_variant" in s for s in batch)
+    orig_row_id = torch.zeros(B, dtype=torch.long) if has_row_meta else None
+    cot_variant = torch.zeros(B, dtype=torch.long) if has_row_meta else None
+
     # Pre-allocate.
     ctx_ids = torch.zeros(B, max_ctx_len, dtype=torch.long)
     ctx_mask = torch.zeros(B, max_ctx_len, dtype=torch.bool)
@@ -54,15 +62,22 @@ def pad_collate(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
             s_len = ids.size(0)
             step_ids[i, j, :s_len] = ids
             step_mask[i, j, :s_len] = mask
+        if has_row_meta:
+            orig_row_id[i] = sample["orig_row_id"]
+            cot_variant[i] = sample["cot_variant"]
         # Remaining step slots (j >= num_steps) stay all-zeros → all-padding.
 
-    return {
+    out = {
         "ctx_input_ids": ctx_ids,
         "ctx_attention_mask": ctx_mask,
         "step_input_ids": step_ids,
         "step_attention_mask": step_mask,
         "num_steps": num_steps,
     }
+    if has_row_meta:
+        out["orig_row_id"] = orig_row_id
+        out["cot_variant"] = cot_variant
+    return out
 
 
 def pad_collate_precomputed_cross(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:

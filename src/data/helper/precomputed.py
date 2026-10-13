@@ -164,14 +164,24 @@ def validate_pair(
     target_paths,
     hidden_size: int,
     max_rows_to_check: int = 512,
+    n_rewrite: int = 1,
 ) -> tuple[int, int]:
     """Validate both branches and confirm they form a consistent pair.
 
-    Checks each file against its branch schema, then asserts that the two
-    branches' full ``sample_index`` sets match exactly (the join keys).
-    The comparison is over the UNION of each branch's part files - the
-    two branches bucket their shards independently, so individual part
-    files are NOT expected to align.
+    Checks each file against its branch schema, then asserts the join-key
+    relationship between the branches.  The comparison is over the UNION
+    of each branch's part files - the two branches bucket their shards
+    independently, so individual part files are NOT expected to align.
+
+    ``n_rewrite == 1`` (standard): the two branches' full
+    ``sample_index`` sets match exactly (1:1 join).
+
+    ``n_rewrite > 1`` (rewritten multi-variant): the ctx branch holds one
+    row per instruction (key = the original row id) while the targets
+    branch holds k rows per instruction with composite keys
+    ``orig_row_id * k + variant``.  The ctx key set must equal the
+    targets keys divided by ``n_rewrite``, and the targets must hold
+    exactly ``n_rewrite`` rows per group.
 
     Returns:
         ``(ctx_rows, target_rows)``.
@@ -183,6 +193,23 @@ def validate_pair(
                        pq.read_table(p, columns=["sample_index"]).to_pandas()["sample_index"].tolist()})
     tgt_keys = sorted({i for p in target_paths for i in
                        pq.read_table(p, columns=["sample_index"]).to_pandas()["sample_index"].tolist()})
+
+    if n_rewrite > 1:
+        tgt_groups = sorted({k // n_rewrite for k in tgt_keys})
+        if ctx_keys != tgt_groups:
+            only_ctx = sorted(set(ctx_keys) - set(tgt_groups))
+            only_tgt = sorted(set(tgt_groups) - set(ctx_keys))
+            raise ValueError(
+                f"branch key sets differ (n_rewrite={n_rewrite}): "
+                f"{len(only_ctx)} ctx-only groups, {len(only_tgt)} targets-only groups"
+            )
+        if len(tgt_keys) != n_rewrite * len(ctx_keys):
+            raise ValueError(
+                f"n_rewrite={n_rewrite}: targets hold {len(tgt_keys)} unique "
+                f"rows for {len(ctx_keys)} ctx rows - expected exactly "
+                f"{n_rewrite} rows per group"
+            )
+        return n_ctx, n_tgt
 
     if ctx_keys != tgt_keys:
         only_ctx = sorted(set(ctx_keys) - set(tgt_keys))

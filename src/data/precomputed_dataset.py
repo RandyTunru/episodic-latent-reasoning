@@ -13,7 +13,9 @@ Mechanics:
 * Construction reads only the tiny ``sample_index`` columns (~1.4 MB for
   the full science split) and builds key -> row-position maps per branch.
 * The two branches are joined on ``sample_index``; :func:`validate_pair`
-  confirms the key sets match before anything else is read.
+  confirms the key relationship before anything else is read - exact
+  1:1 equality for standard data, or the relaxed 1:k form for rewritten
+  multi-variant data (see ``n_rewrite`` below).
 * Blob payloads are decoded per row on demand via ``torch.frombuffer`` -
   zero-copy (read-only) views over the decoded row bytes.
 * Row order is arbitrary and per-epoch shuffling happens in the DataLoader
@@ -25,6 +27,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import bisect
+import json
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -71,6 +74,19 @@ class PrecomputedReasoningDataset(Dataset):
         max_ctx_len: Optional cap on ctx tokens per sample, applied at
             load (training).  Slices the stored embeddings - no
             re-encoding.
+        n_rewrite: Rewrite variants per instruction (the k in the
+            precompute's composite key ``orig_row_id * k + cot_variant``).
+            ``1`` (the default when unset and no sidecar exists) = standard
+            data: each row is its own group, the join is exact 1:1.
+            ``> 1`` = rewritten multi-variant data: the targets branch
+            holds k rows per instruction (composite keys) while the ctx
+            branch holds ONE row per instruction (key = orig_row_id), and
+            every variant row resolves its ctx through
+            ``ctx_pos[key // n_rewrite]`` - the stored ctx is shared k
+            ways, never duplicated.  The ctx keys must be the dense
+            enumeration ``0..N-1`` (checked at init).  When None, the
+            value is read from the targets branch's part-*.json stats
+            sidecar (which records the key formula), else defaults to 1.
         validate: Run :func:`validate_pair` before reading (cheap; reads
             schemas and key columns only).
 
@@ -93,6 +109,7 @@ class PrecomputedReasoningDataset(Dataset):
         hidden_size: int,
         max_steps: Optional[int] = None,
         max_ctx_len: Optional[int] = None,
+        n_rewrite: Optional[int] = None,
         validate: bool = True,
     ):
         ctx_paths = sorted(Path(ctx_dir).glob("part-*.parquet"))
@@ -102,8 +119,29 @@ class PrecomputedReasoningDataset(Dataset):
                 f"no part-*.parquet files found under {ctx_dir} and {targets_dir}"
             )
 
+        # The precompute records the key formula in its per-part stats
+        # sidecar; when the caller doesn't pass n_rewrite explicitly,
+        # read it from there (single source of truth).  Standard runs
+        # predating the sidecar field default to 1.
+        if n_rewrite is None:
+            n_rewrite = 1
+            part_jsons = sorted(Path(targets_dir).glob("part-*.json"))
+            if part_jsons:
+                try:
+                    n_rewrite = int(
+                        json.loads(part_jsons[0].read_text()).get("n_rewrite", 1)
+                    )
+                except (OSError, ValueError):
+                    n_rewrite = 1
+        if n_rewrite < 1:
+            raise ValueError(f"n_rewrite must be >= 1, got {n_rewrite}")
+        self.n_rewrite = n_rewrite
+
         if validate:
-            validate_pair([str(p) for p in ctx_paths], [str(p) for p in tgt_paths], hidden_size)
+            validate_pair(
+                [str(p) for p in ctx_paths], [str(p) for p in tgt_paths],
+                hidden_size, n_rewrite=n_rewrite,
+            )
 
         # Row-group index over the part files (metadata only).  Per-row
         # fetches decode just the containing 32-row group (~4-10 MB)
@@ -126,7 +164,21 @@ class PrecomputedReasoningDataset(Dataset):
         tgt_keys = tgt_cols["sample_index"].tolist()
         self.ctx_pos = {k: i for i, k in enumerate(ctx_keys)}
         self.tgt_pos = {k: i for i, k in enumerate(tgt_keys)}
-        self.keys = sorted(self.ctx_pos)
+        # The dataset's rows are the TARGETS rows.  With n_rewrite > 1 a
+        # variant's ctx row is its group's single ctx row (key //
+        # n_rewrite); with n_rewrite == 1 the sets are equal (validated
+        # above) and this is the standard 1:1 join.
+        self.keys = sorted(self.tgt_pos)
+
+        # The ctx branch must be the dense enumeration 0..N-1 for the
+        # 1:k join (a targets key k resolves ctx via k // n_rewrite, so
+        # ctx keys must BE the group ids).
+        if n_rewrite > 1 and sorted(ctx_keys) != list(range(len(ctx_keys))):
+            raise ValueError(
+                "ctx branch keys must be the dense enumeration 0..N-1 to "
+                "serve as orig_row_id for the n_rewrite join; found gaps "
+                "or reordering"
+            )
 
         # Length arrays aligned with self.keys order (for the sampler).
         ctx_len_by_key = dict(zip(ctx_keys, ctx_cols["ctx_len"].tolist()))
@@ -147,7 +199,9 @@ class PrecomputedReasoningDataset(Dataset):
                 f"PrecomputedReasoningDataset: dropped {n_all - len(self.keys)} "
                 f"of {n_all} samples with num_steps_stored == 0"
             )
-        ctx_lens = np.array([ctx_len_by_key[k] for k in self.keys], dtype=np.int64)
+        ctx_lens = np.array(
+            [ctx_len_by_key[k // n_rewrite] for k in self.keys], dtype=np.int64,
+        )
         num_steps_arr = np.array(
             [stored_by_key[k] for k in self.keys], dtype=np.int64
         )
@@ -194,8 +248,14 @@ class PrecomputedReasoningDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         key = self.keys[idx]
 
-        # Follow the join key into each branch's physical layout.
-        ctx_row = self._fetch("_ctx_cache", self._ctx_entries, self._ctx_starts, self.ctx_pos[key])
+        # Follow the join key into each branch's physical layout.  With
+        # n_rewrite > 1 every variant row resolves its ctx through its
+        # group's single ctx row (key // n_rewrite); with n_rewrite == 1
+        # this is the plain 1:1 join (key // 1 == key).
+        ctx_row = self._fetch(
+            "_ctx_cache", self._ctx_entries, self._ctx_starts,
+            self.ctx_pos[key // self.n_rewrite],
+        )
         tgt_row = self._fetch("_tgt_cache", self._tgt_entries, self._tgt_starts, self.tgt_pos[key])
 
         # The column records the TRUE step count (X) - the router's halt
