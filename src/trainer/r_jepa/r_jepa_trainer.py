@@ -388,10 +388,12 @@ class Trainer:
         halt_rate = metrics.get("val/halt_rate", float("nan"))
         abs_off = metrics.get("val/abs_mean_offset", float("nan"))
         l1_loss = metrics.get("val/halt_l1", float("nan"))
+        gap_loss = metrics.get("val/halt_l1_true_gap", float("nan"))
         print(
             f"Eval   {step:06d} | loss={metrics['val/loss']:.4f} | "
             f"reg={metrics['val/regression_loss']:.4f} | router_bce={metrics['val/router_bce']:.4f} | "
-            f"halt_rate={halt_rate:.3f} | abs_off={abs_off:.1f} | f1={metrics['val/f1']:.3f} | halt_l1={l1_loss:.3f}"
+            f"halt_rate={halt_rate:.3f} | abs_off={abs_off:.1f} | f1={metrics['val/f1']:.3f} |"
+            f"halt_l1={l1_loss:.3f} | halt_l1_true_gap={gap_loss:.3f}"
         )
         return metrics
 
