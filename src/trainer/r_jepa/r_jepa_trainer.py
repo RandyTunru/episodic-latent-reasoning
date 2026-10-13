@@ -213,6 +213,13 @@ class Trainer:
           late halts only cost cheap predictor steps.
         * ``exact_halt`` / ``within_1`` - fraction of those rows with
           |offset| <= 0 / 1.
+        * ``halt_l1`` / ``halt_l1_true_gap`` - conclusion similarity:
+          L1 between the predicted state at the model's halt position and
+          the true state at the TRUE halt position, alongside the same
+          distance between true states (the chain's own movement).  Read
+          together: halt_l1 ~= true_gap means the model is as good as the
+          true chain at its halt position; the excess is the model's own
+          error.
         * ``false_halt_rate`` - of CUT rows (true end beyond the window),
           the fraction where the router halted anyway.
         * ``f1`` / ``precision`` / ``recall`` - per-position halt
@@ -223,6 +230,7 @@ class Trainer:
         """
         self.model.eval()
 
+        pred_list, tgt_list = [], []
         logits_list, valid_list, ns_list, ns_true_list = [], [], [], []
         weighted = {"loss": 0.0, "regression_loss": 0.0, "router_bce": 0.0}
         num_valid_total = 0
@@ -250,6 +258,9 @@ class Trainer:
                 weighted["regression_loss"] += regression_loss.item() * n_valid
                 weighted["router_bce"] += router_bce.item() * n_valid
 
+                pred_list.append(preds.detach().cpu()) # (B, S_i, E), S_i = this bucket's batch max
+                tgt_list.append(targets.detach().cpu()) # same shape as preds; one target per valid step
+
                 logits_list.append(router_logits.detach().cpu())
                 valid_list.append(step_valid.detach().cpu())
                 ns_list.append(val_batch["num_steps"].cpu())
@@ -273,12 +284,22 @@ class Trainer:
         ns = torch.cat(ns_list)              # (N,)
         ns_true = torch.cat(ns_true_list)    # (N,)
 
+        # Same global-width padding for the latent tensors: the halt_l1
+        # gather indexes rows by position, so every batch must share S.
+        # Pad values are never gathered (halt positions are always valid).
+        preds_cat = torch.cat([
+            F.pad(t, (0, 0, 0, max_S - t.shape[1])) for t in pred_list
+        ])  # (N, S, E)
+        tgt_cat = torch.cat([
+            F.pad(t, (0, 0, 0, max_S - t.shape[1])) for t in tgt_list
+        ])  # (N, S, E)
+
         # Predicted halt: first valid position with logit > 0 (infer's rule).
         masked_logits = logits.masked_fill(~valid, float("-inf"))
         did_halt = (masked_logits > 0).any(dim=1)
         pred_halt = torch.where(
             did_halt, (masked_logits > 0).int().argmax(dim=1), -1,
-        )
+        ) # (N,), return the position of the first halt logit, or -1 if no halt was predicted
 
         # The halt is knowable only when the true end sits inside the
         # visible window; cut rows should show no halt at all.
@@ -306,6 +327,28 @@ class Trainer:
                 metrics["val/median_offset"] = offset.median().item() # median offset, lower is better. no sign information
                 metrics["val/exact_halt"] = (offset == 0).float().mean().item() # fraction of visible-end rows that halted exactly at the true end, higher is better
                 metrics["val/within_1"] = (offset.abs() <= 1).float().mean().item() # fraction of visible-end rows that halted within 1 step (both early and late) of the true end, higher is better
+
+                # Conclusion similarity: L1 between the state the model
+                # reached at ITS halt position and the true state at the
+                # TRUE halt position - a convergence check, not a position
+                # check.  It is confounded by the chain's own movement
+                # between the two positions, so it is logged alongside
+                # halt_l1_true_gap (the same distance between TRUE states).
+                # Read together: halt_l1 ~= true_gap means the model is as
+                # good as the true chain itself at its halt position; the
+                # excess is the model's own error.  At t_hat == t* the gap
+                # is 0 and halt_l1 equals the regression error at the
+                # final step.
+                halt_rows = eval_halt.nonzero(as_tuple=True)[0]
+                pred_at_halt = preds_cat[halt_rows, pred_halt[halt_rows]]
+                true_at_halt = tgt_cat[halt_rows, true_halt[halt_rows]]
+                true_at_pred = tgt_cat[halt_rows, pred_halt[halt_rows]]
+                metrics["val/halt_l1"] = (
+                    pred_at_halt - true_at_halt
+                ).abs().mean(dim=-1).mean().item()
+                metrics["val/halt_l1_true_gap"] = (
+                    true_at_halt - true_at_pred
+                ).abs().mean(dim=-1).mean().item()
 
         n_cut = int(cut.sum())
         if n_cut > 0:
@@ -344,10 +387,11 @@ class Trainer:
 
         halt_rate = metrics.get("val/halt_rate", float("nan"))
         abs_off = metrics.get("val/abs_mean_offset", float("nan"))
+        l1_loss = metrics.get("val/halt_l1", float("nan"))
         print(
             f"Eval   {step:06d} | loss={metrics['val/loss']:.4f} | "
             f"reg={metrics['val/regression_loss']:.4f} | router_bce={metrics['val/router_bce']:.4f} | "
-            f"halt_rate={halt_rate:.3f} | abs_off={abs_off:.1f} | f1={metrics['val/f1']:.3f}"
+            f"halt_rate={halt_rate:.3f} | abs_off={abs_off:.1f} | f1={metrics['val/f1']:.3f} | halt_l1={l1_loss:.3f}"
         )
         return metrics
 
