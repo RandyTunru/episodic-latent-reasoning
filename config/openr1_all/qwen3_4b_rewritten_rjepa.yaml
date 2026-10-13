@@ -1,5 +1,5 @@
 project_name: "qwen-3.4b-rjepa-openr1"
-run_name: "qwen-3-llm-4b-rjepa-openr1-all-rewritten-01"
+run_name: "qwen-3-llm-4b-rjepa-openr1-all-rewritten-02"
 
 # Data
 ctx_dir: "/data/episodic-latent-reasoning/data/processed/openr1_all_precomputed/ctx/Qwen_Qwen3-4B"
@@ -16,7 +16,7 @@ predictor_max_seq_len: 512
 
 # Router
 router_alpha: 0.2
-router_halt_weight: 7 # Ratio of the halt to continue is roughly 1:200, used sqrt(200) = 14.14, so we set it to 14.0
+router_halt_weight: 5 # Ratio of the halt to continue is roughly 1:25 (each sequence has 25 steps on average which only has 1 halt step), used sqrt(25) = 5, so we set it to 5.0
 
 # Encoder
 encoder_hidden_size: 2560
