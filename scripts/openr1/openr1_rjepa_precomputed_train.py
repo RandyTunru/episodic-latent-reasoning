@@ -81,17 +81,55 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_val_split(
+    dataset, primary, secondary, batch_size, val_per_bucket, n_rewrite=1,
+):
+    """Group-aware held-out split over precomputed rows.
+
+    Holds out the last ``val_per_bucket`` GROUPS of each length bucket,
+    where a group is the n_rewrite rewrite variants of one instruction
+    (recovered as ``sample_index // n_rewrite``).  Every row of a held
+    group is excluded from training, including sibling variants that
+    landed in other length buckets.  With ``n_rewrite == 1`` each row is
+    its own group and the behavior is exactly the original per-row
+    bucket-tail holdout.
+
+    Returns ``(train_indices, val_indices)`` lists of dataset row positions.
+    """
+    keys = np.array([int(k) for k in dataset.keys], dtype=np.int64)
+    groups = keys // n_rewrite
+
+    sampler = BucketedBatchSampler(
+        primary, secondary=secondary, batch_size=batch_size,
+    )
+    held_groups = set()
+    for members in sampler.buckets:
+        seen = list(dict.fromkeys(groups[members].tolist()))  # dedupe, keep order
+        held_groups.update(seen[-val_per_bucket:])
+
+    held = np.isin(groups, np.fromiter(held_groups, dtype=np.int64))
+    val_indices = np.nonzero(held)[0].tolist()
+    train_indices = np.nonzero(~held)[0].tolist()
+    return train_indices, val_indices
+
+
 def main(config) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ---- data: joined branches + length-bucketed batch sampling ----
+    # n_rewrite comes from the config when set; the dataset falls back to
+    # the precompute's part-*.json sidecar (and to 1, the standard 1:1
+    # join) when unset.  The dataset resolves it so the 1:k ctx join and
+    # the group holdout below always agree.
     dataset = PrecomputedReasoningDataset(
         ctx_dir=config["ctx_dir"],
         targets_dir=config["targets_dir"],
         hidden_size=config["encoder_hidden_size"],
         max_steps=config["predictor_max_seq_len"],
         max_ctx_len=config["encoder_max_seq_len"],
+        n_rewrite=config.get("n_rewrite"),
     )
+    n_rewrite = dataset.n_rewrite
 
     if config["cross_attention"]:
         primary, secondary = dataset.bucket_keys("cross")
@@ -100,22 +138,20 @@ def main(config) -> None:
         primary, secondary = dataset.bucket_keys("causal")
         collate_fn = pad_collate_precomputed_causal
 
-    # Hold out the last few rows of each length bucket for router eval:
-    # stratified by chain length so the halting metrics see the full
-    # length distribution instead of the mostly-short mode.  The holdout
-    # is removed from training, and each split gets its own bucketed
-    # sampler over ITS OWN coordinate space - bucket membership does not
-    # survive subsetting.
-    full_sampler = BucketedBatchSampler(
-        primary, secondary=secondary, batch_size=config["batch_size"],
+    # Hold out the last few GROUPS of each length bucket for router eval.
+    # A group = the n_rewrite rewrite variants of one instruction
+    # (sample_index // n_rewrite); with n_rewrite == 1 every row is its
+    # own group and this degenerates exactly to the old per-row bucket-tail
+    # holdout.  All variants of a held group leave training, even where
+    # sibling variants landed in other length buckets.
+    train_indices, val_indices = build_val_split(
+        dataset,
+        primary,
+        secondary=secondary,
+        batch_size=config["batch_size"],
+        val_per_bucket=config.get("val_per_bucket", config["batch_size"]),
+        n_rewrite=n_rewrite,
     )
-    val_samples = full_sampler._sample_per_bucket(
-        num_samples=config.get("val_per_bucket", config["batch_size"])
-    )
-    val_indices = sorted({int(i) for i in val_samples})
-    train_indices = np.setdiff1d(
-        np.arange(len(dataset)), np.asarray(val_indices), assume_unique=True,
-    ).tolist()
 
     training_dataset = Subset(dataset, train_indices)
     validation_dataset = Subset(dataset, val_indices)
