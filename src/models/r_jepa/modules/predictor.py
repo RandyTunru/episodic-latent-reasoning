@@ -47,7 +47,7 @@ class RJEPAPredictor(nn.Module, ABC):
         self.norm = RMSNorm(predictor_dim)
         self.up_projection = nn.Linear(predictor_dim, encoder_dim)
 
-        self.router = nn.Linear(predictor_dim, 1)
+        self.router = nn.Linear(encoder_dim, 1) # Since it now predicts the halt logits directly on the output semantic representation, we use encoder_dim instead of predictor_dim
 
         # Precompute RoPE frequencies.
         head_dim = predictor_dim // num_heads
@@ -154,6 +154,8 @@ class CrossAttentionPredictor(RJEPAPredictor):
             )
         x = self.norm(x)
 
+        # Cross-attention variant router has not been updated to reflect the changes
+        # Made in the causal attention, please refer to the causal attention predictor for the updated router implementation
         router_logits = self.router(x).squeeze(-1)  # (B, S)
         x = self.up_projection(x)                   # (B, S, E)
 
@@ -334,8 +336,18 @@ class CausalAttentionPredictor(RJEPAPredictor):
             )
         x = self.norm(x)
 
-        router_all = self.router(x).squeeze(-1)                        # (B, T1)
+        # Older version
+        # router_all = self.router(x).squeeze(-1)                        # (B, T1)
+        # x = self.up_projection(x)                                      # (B, T1, E)
+
+        # Newer version
+        # Uses the predicted latent steps to compute the router logits
+        # Which means it is predicting halt directly on the potential future latent states (possibly the halt)
+        # detach() is used to prevent gradients from flowing back from the router
+        # Which means router's gradients will not affect the predictor's parameters 
+        # (Latent representation will not be affected by router signals and halt only depends on the output semantic)
         x = self.up_projection(x)                                      # (B, T1, E)
+        router_all = self.router(x.detach()).squeeze(-1)                        # (B, T1)
 
         # Gather reasoning positions: output j of sample i sits at packed
         # position ctx_len[i] + j - j = 0 is the start-token output
