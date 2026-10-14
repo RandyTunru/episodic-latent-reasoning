@@ -1,5 +1,5 @@
 project_name: "qwen-3.4b-rjepa-openr1"
-run_name: "qwen-3-llm-4b-rjepa-openr1-all-rewritten-03"
+run_name: "non-detached-router-01"
 
 # Data
 ctx_dir: "/data/episodic-latent-reasoning/data/processed/openr1_all_precomputed/ctx/Qwen_Qwen3-4B"
@@ -43,7 +43,7 @@ eval_every: 5500 # Evaluate every 1 epoch, roughly 5500 steps
 val_per_bucket: 16
 
 wandb_dir : "logs"
-checkpoint_dir : "artifacts/checkpoints/qwen3_llm_4b_rjepa_openr1_all_rewritten_03"
+checkpoint_dir : "artifacts/checkpoints/non_detached_router_01"
 
 # Checkpoint loading
 from_checkpoint: null
