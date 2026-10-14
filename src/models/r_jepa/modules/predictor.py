@@ -343,11 +343,14 @@ class CausalAttentionPredictor(RJEPAPredictor):
         # Newer version
         # Uses the predicted latent steps to compute the router logits
         # Which means it is predicting halt directly on the potential future latent states (possibly the halt)
-        # detach() is used to prevent gradients from flowing back from the router
-        # Which means router's gradients will not affect the predictor's parameters 
-        # (Latent representation will not be affected by router signals and halt only depends on the output semantic)
+
+        # STILL IN EXPERIMENTAL STAGE, NOT TESTED YET
+        # This version removes the detach which means that the router's gradient will flow through the predictor's output
+        # The only difference between this and the original version is that the router is now predicting halt on the output of the predictor
+        # And not a hidden representation of the predictor before the up projection
+        # Without the detach, the router would now also affect the up_projection as well aside from just the hidden layers before it
         x = self.up_projection(x)                                      # (B, T1, E)
-        router_all = self.router(x.detach()).squeeze(-1)                        # (B, T1)
+        router_all = self.router(x).squeeze(-1)                        # (B, T1)
 
         # Gather reasoning positions: output j of sample i sits at packed
         # position ctx_len[i] + j - j = 0 is the start-token output
