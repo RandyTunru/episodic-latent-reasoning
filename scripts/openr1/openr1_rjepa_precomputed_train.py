@@ -29,7 +29,10 @@ load_dotenv()
 import numpy as np
 import torch
 import wandb
+
 from torch.utils.data import DataLoader, Subset
+
+from src.utils.optim import param_groups_with_decay
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -197,10 +200,15 @@ def main(config) -> None:
         encoder_pooling=config["encoder_pooling"],
     ).to(device)
 
-    optimizer = torch.optim.AdamW(
-        model.trainable_parameters(), lr=config["learning_rate"],
-        betas=(0.9, 0.95), weight_decay=config.get("weight_decay", 0.1),
+    param_groups = param_groups_with_decay(
+        model,
+        lr=config["learning_rate"],
+        weight_decay=config.get("weight_decay", 0.1),
+        betas=(0.9, 0.95),
+        no_decay_patterns=("norm", "bias", "router"),
     )
+
+    optimizer = torch.optim.AdamW(param_groups)
 
     start_step = 0
 
