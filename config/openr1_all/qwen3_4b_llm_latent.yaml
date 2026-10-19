@@ -1,0 +1,38 @@
+project_name: "qwen-3.4b-llm-latent-answers"
+run_name: "llm-latent-pilot-01"
+
+# Model + data
+model_id: "Qwen/Qwen3-4B"
+rewrite_dir: "/data/episodic-latent-reasoning/data/raw/openr1_all_rewritten_cot"
+latents_dir: "data/processed/openr1_all_latent_precomputed/detached_step55000"
+ctx_dir: "/data/episodic-latent-reasoning/data/processed/openr1_all_precomputed/ctx/Qwen_Qwen3-4B"
+targets_dir: "/data/episodic-latent-reasoning/data/processed/openr1_all_rewritten_precomputed/targets/Qwen_Qwen3-Embedding-4B"
+n_rewrite: 1
+
+# Input condition: latents | cot | none
+mode: "latents"
+
+# Token budgets
+max_ctx_tokens: 512
+max_answer_tokens: 512
+max_latent_steps: 128
+max_cot_tokens: 1024
+
+# Predictor-side references (for the shared val split)
+encoder_hidden_size: 2560
+predictor_max_seq_len: 512
+encoder_max_seq_len: 2048
+val_per_bucket: 16
+
+# Optimization (projection only, LLM frozen)
+batch_size: 8
+gradient_accumulation_steps: 4
+learning_rate: 1.0e-3
+weight_decay: 0.01
+max_steps: 5000
+
+# Logging
+log_every: 20
+save_every: 500
+wandb_dir: "logs"
+checkpoint_dir: "artifacts/checkpoints/llm_latent_pilot_01"
