@@ -161,33 +161,38 @@ def build_batch(rows, tokenizer, embed_fn, proj, config, device, mode):
     S = max(l.size(0) for l in latents) if mode == "latents" else 0
     L_cot = max(len(x) for x in cot_ids) if mode == "cot" else 0
     total = L_inst + S + L_cot + L_ans
-    H = embed_fn.weight.size(0)
+    H = embed_fn.weight.size(1)  # (vocab, hidden) - size(1) is the hidden dim
 
     embeds = torch.zeros(B, total, H, dtype=torch.bfloat16, device=device)
     labels = torch.full((B, total), -100, dtype=torch.long, device=device)
     mask = torch.zeros(B, total, dtype=torch.long, device=device)
 
-    with torch.no_grad():
-        for i in range(B):
-            p = 0
-            embeds[i, :L_inst] = embed_fn(torch.tensor(
-                inst_ids[i], device=device))
-            mask[i, :len(inst_ids[i])] = 1
-            p += L_inst
-            if mode == "latents":
-                embeds[i, p:p + S] = proj(latents[i].to(
-                    device, dtype=torch.bfloat16))
-                mask[i, p:p + latents[i].size(0)] = 1
-                p += S
-            elif mode == "cot":
-                embeds[i, p:p + L_cot] = embed_fn(torch.tensor(
-                    cot_ids[i], device=device))
-                mask[i, p:p + len(cot_ids[i])] = 1
-                p += L_cot
-            a = ans_ids[i]
-            embeds[i, p:p + L_ans] = embed_fn(torch.tensor(a, device=device))
-            labels[i, p:p + len(a)] = torch.tensor(a, device=device)
-            mask[i, p:p + len(a)] = 1
+    for i in range(B):
+        p = 0
+        with torch.no_grad():  # frozen token embeddings only
+            e_inst = embed_fn(torch.tensor(inst_ids[i], device=device))
+        embeds[i, :e_inst.size(0)] = e_inst
+
+        mask[i, :len(inst_ids[i])] = 1
+        p += L_inst
+        if mode == "latents":
+            lat_i = latents[i].to(device, dtype=torch.bfloat16)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                embeds[i, p:p + lat_i.size(0)] = proj(lat_i)
+            mask[i, p:p + latents[i].size(0)] = 1
+            p += S
+        elif mode == "cot":
+            with torch.no_grad():
+                e_cot = embed_fn(torch.tensor(cot_ids[i], device=device))
+            embeds[i, p:p + e_cot.size(0)] = e_cot
+            mask[i, p:p + len(cot_ids[i])] = 1
+            p += L_cot
+        a = ans_ids[i]
+        with torch.no_grad():
+            e_ans = embed_fn(torch.tensor(a, device=device))
+        embeds[i, p:p + e_ans.size(0)] = e_ans
+        labels[i, p:p + len(a)] = torch.tensor(a, device=device)
+        mask[i, p:p + len(a)] = 1
     return embeds, labels, mask
 
 
@@ -198,7 +203,7 @@ def main(config_path: str) -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(config["model_id"])
     model = AutoModelForCausalLM.from_pretrained(
-        config["model_id"], torch_dtype=torch.bfloat16,
+        config["model_id"], dtype=torch.bfloat16,
     ).to(device)
     for p in model.parameters():
         p.requires_grad = False
@@ -249,11 +254,12 @@ def main(config_path: str) -> None:
         embeds, labels, mask = build_batch(
             rows, tokenizer, embed_fn, proj, config, device, mode,
         )
-        out = model(inputs_embeds=embeds, attention_mask=mask, labels=labels)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            out = model(inputs_embeds=embeds, attention_mask=mask, labels=labels)
         return out.loss / grad_accum
 
     data_iter = iter(DataLoader(ds, batch_size=batch_size, shuffle=True,
-                                num_workers=0))
+                                num_workers=0, collate_fn=lambda x: x))
     print("Starting LLM latent training loop ...", flush=True)
     while step < max_steps:
         opt.zero_grad(set_to_none=True)
@@ -262,7 +268,8 @@ def main(config_path: str) -> None:
                 batch = next(data_iter)
             except StopIteration:
                 data_iter = iter(DataLoader(ds, batch_size=batch_size,
-                                            shuffle=True, num_workers=0))
+                                            shuffle=True, num_workers=0,
+                                            collate_fn=lambda x: x))
                 batch = next(data_iter)
             loss = forward_batch(batch)
             loss.backward()
