@@ -129,24 +129,64 @@ class LatentAnswerDataset(Dataset):
 def build_batch(rows, tokenizer, embed_fn, proj, config, device, mode):
     """Assemble one batch as inputs_embeds/labels/attention_mask.
 
-    Layout per sample: [instruction | latents-or-cot | answer]; padded
-    positions carry attention_mask=0 and label=-100.
+    Layout per sample (chat template + think-block boundaries):
+
+        [<|im_start|>user ... <think>] [latents-or-cot] [</think>...] [answer]
+
+    The template is rendered with ``enable_thinking=False``, which
+    pre-fills an EMPTY ``<think>\n\n</think>`` block - the Qwen3
+    non-thinking mechanism.  We inject the reasoning payload INSIDE that
+    block: projected latents (mode latents) or CoT text tokens (mode
+    cot); mode none leaves the block empty.  The model's own prior does
+    the work: content inside <think> is reasoning to read, and a
+    completed think block means "answer now".  Padded positions carry
+    attention_mask=0 and label=-100; only answer tokens carry labels.
     """
     max_ctx = config["max_ctx_tokens"]
     max_ans = config["max_answer_tokens"]
     max_lat = config.get("max_latent_steps", 128)
     max_cot = config.get("max_cot_tokens", 1024)
 
-    inst_ids, ans_ids, latents, cot_ids = [], [], [], []
+    think_id = tokenizer.convert_tokens_to_ids("<think>")
+    close_id = tokenizer.convert_tokens_to_ids("</think>")
+    if think_id is None or close_id is None:
+        raise RuntimeError("tokenizer has no <think>/</think> tokens - "
+                           "cannot build think-block boundaries")
+
+    pre_ids, post_ids, ans_ids, latents, cot_ids = [], [], [], [], []
     for inst, ans, cot, lat in rows:
-        inst_ids.append(tokenizer(
+        # truncate the instruction text first (tokenize -> decode is
+        # lossless for text without special tokens), then template it
+        trunc = tokenizer(
             inst, truncation=True, max_length=max_ctx,
-            add_special_tokens=True,
-        )["input_ids"])
-        ans_ids.append(tokenizer(
-            ans, truncation=True, max_length=max_ans,
             add_special_tokens=False,
-        )["input_ids"] + [tokenizer.eos_token_id])
+        )["input_ids"]
+        inst_text = tokenizer.decode(trunc, skip_special_tokens=True)
+        tpl = tokenizer.apply_chat_template(
+            [{"role": "user", "content": inst_text}],
+            add_generation_prompt=True, enable_thinking=False,
+            return_tensors="pt",
+        )["input_ids"][0].tolist()
+        open_pos = [i for i, t in enumerate(tpl) if t == think_id]
+        close_pos = [i for i, t in enumerate(tpl) if t == close_id]
+        if not open_pos or not close_pos:
+            raise RuntimeError(
+                "chat template produced no <think> block (template "
+                "version may differ; expected the empty think block)"
+            )
+        pre_ids.append(tpl[:open_pos[0] + 1])   # ...up to and incl. <think>
+        post_ids.append(tpl[close_pos[0]:])     # </think>... onward
+        # EOS is appended ONLY when the answer fits inside the cap.
+        # A truncated answer is left UNENDED: appending EOS at the cut
+        # teaches the projection false endings (the 513-token self-cut
+        # bug).  An unended prefix gives honest partial supervision.
+        a_full = tokenizer(
+            ans, truncation=False, add_special_tokens=False,
+        )["input_ids"]
+        if len(a_full) <= max_ans:
+            ans_ids.append(a_full + [tokenizer.eos_token_id])
+        else:
+            ans_ids.append(a_full[:max_ans])
         if mode == "latents":
             latents.append(lat[:max_lat])
         elif mode == "cot":
@@ -156,11 +196,12 @@ def build_batch(rows, tokenizer, embed_fn, proj, config, device, mode):
             )["input_ids"])
 
     B = len(rows)
-    L_inst = max(len(x) for x in inst_ids)
+    L_pre = max(len(x) for x in pre_ids)
+    L_post = max(len(x) for x in post_ids)
     L_ans = max(len(x) for x in ans_ids)
     S = max(l.size(0) for l in latents) if mode == "latents" else 0
     L_cot = max(len(x) for x in cot_ids) if mode == "cot" else 0
-    total = L_inst + S + L_cot + L_ans
+    total = L_pre + S + L_cot + L_post + L_ans
     H = embed_fn.weight.size(1)  # (vocab, hidden) - size(1) is the hidden dim
 
     embeds = torch.zeros(B, total, H, dtype=torch.bfloat16, device=device)
@@ -170,12 +211,14 @@ def build_batch(rows, tokenizer, embed_fn, proj, config, device, mode):
     for i in range(B):
         p = 0
         with torch.no_grad():  # frozen token embeddings only
-            e_inst = embed_fn(torch.tensor(inst_ids[i], device=device))
-        embeds[i, :e_inst.size(0)] = e_inst
-
-        mask[i, :len(inst_ids[i])] = 1
-        p += L_inst
+            e_pre = embed_fn(torch.tensor(pre_ids[i], device=device))
+            e_post = embed_fn(torch.tensor(post_ids[i], device=device))
+        embeds[i, :e_pre.size(0)] = e_pre
+        mask[i, :len(pre_ids[i])] = 1
+        p += L_pre
         if mode == "latents":
+            # proj forward is OUTSIDE no_grad: its output must carry the
+            # autograd graph so the projection receives gradients.
             lat_i = latents[i].to(device, dtype=torch.bfloat16)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 embeds[i, p:p + lat_i.size(0)] = proj(lat_i)
@@ -187,6 +230,9 @@ def build_batch(rows, tokenizer, embed_fn, proj, config, device, mode):
             embeds[i, p:p + e_cot.size(0)] = e_cot
             mask[i, p:p + len(cot_ids[i])] = 1
             p += L_cot
+        embeds[i, p:p + e_post.size(0)] = e_post
+        mask[i, p:p + len(post_ids[i])] = 1
+        p += L_post
         a = ans_ids[i]
         with torch.no_grad():
             e_ans = embed_fn(torch.tensor(a, device=device))
@@ -207,6 +253,8 @@ def main(config_path: str) -> None:
     ).to(device)
     for p in model.parameters():
         p.requires_grad = False
+
+    model.gradient_checkpointing_enable() # Enable gradient checkpointing for memory efficiency
     model.eval()
     embed_fn = model.get_input_embeddings()
 
