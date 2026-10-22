@@ -14,19 +14,19 @@ mode: "latents"
 
 # Token budgets
 max_ctx_tokens: 512
-max_answer_tokens: 512
+max_answer_tokens: 2048
 max_latent_steps: 128
 max_cot_tokens: 1024
 
 # Predictor-side references (for the shared val split)
 encoder_hidden_size: 2560
 predictor_max_seq_len: 512
-encoder_max_seq_len: 2048
+encoder_max_seq_len: 4096
 val_per_bucket: 16
 
 # Optimization (projection only, LLM frozen)
-batch_size: 8
-gradient_accumulation_steps: 4
+batch_size: 2 # halved + accum doubled to fit 2048-token answers (activation memory ~seq length)
+gradient_accumulation_steps: 16
 learning_rate: 1.0e-3
 weight_decay: 0.01
 max_steps: 5000
