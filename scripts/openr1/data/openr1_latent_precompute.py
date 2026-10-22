@@ -48,7 +48,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.openr1.openr1_reasoning_precompute import init_process_group
+from scripts.openr1.data.openr1_reasoning_precompute import init_process_group
 from src.data.precomputed_dataset import PrecomputedReasoningDataset
 from src.models.r_jepa.r_jepa import CausalRJEPA
 from tools.telegram_service import send_bot_message
