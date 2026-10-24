@@ -81,8 +81,8 @@ def parse_args() -> argparse.Namespace:
                             "llm_latent_pilot_01/projection_step_005000.pt"),
                    help="projection checkpoint (MoT-latent for zero-shot; "
                         "GSM8K-latent for the adaptation column)")
-    p.add_argument("--predictor-config", type=str, default=PREDICTOR_CONFIG,
-                   help="predictor architecture config yaml")
+    # p.add_argument("--predictor-config", type=str, default=PREDICTOR_CONFIG,
+    #                help="predictor architecture config yaml")
     p.add_argument("--max-steps", type=int, default=64,
                    help="predictor generation cap")
     p.add_argument("--halt-threshold", type=float, default=0.0,
@@ -121,10 +121,9 @@ LATENT_SCHEMA = pa.schema([
 ])
 
 
-def encode_ctxs(args, questions, device):
+def encode_ctxs(config, questions, device):
     """Frozen Qwen3-4B token-level encodings of the question prompts
     (mirrors the precompute ctx branch)."""
-    config = yaml.safe_load(open(args.predictor_config))
     max_ctx = config["encoder_max_seq_len"]
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
@@ -155,8 +154,8 @@ def encode_ctxs(args, questions, device):
     return rows
 
 
-def build_predictor(args, device):
-    config = yaml.safe_load(open(args.predictor_config))
+def build_predictor(ck, device):
+    config = ck["config"]
     kwargs = dict(
         encoder_dim=config["encoder_hidden_size"],
         predictor_dim=config["predictor_hidden_size"],
@@ -171,17 +170,20 @@ def build_predictor(args, device):
         encoder_max_seq_length=config["encoder_max_seq_len"],
         encoder_pooling=config["encoder_pooling"],
     ).to(device)
-    ck = torch.load(args.predictor_checkpoint, map_location="cpu",
-                    weights_only=False)
+
     model.load_state_dict(ck["model_state_dict"], strict=True)
     model.eval()
-    return model.predictor, config
+    return model.predictor
 
 
 def main(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = new_run_dir(BENCHMARK, "rjepa", args.run_name)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    ck = torch.load(args.predictor_checkpoint, map_location="cpu",
+                    weights_only=False)
+    config = ck["config"]
 
     questions, source = load_questions(args)
     print(f"{len(questions)} questions (source: {source}), "
@@ -195,7 +197,7 @@ def main(args) -> None:
     else:
         print("encoding ctx with frozen Qwen3-4B ...", flush=True)
         t0 = time.time()
-        ctx_rows = encode_ctxs(args, questions, device)
+        ctx_rows = encode_ctxs(config, questions, device)
         pq.write_table(pa.Table.from_pylist(ctx_rows, schema=CTX_SCHEMA),
                        ctx_path, row_group_size=64)
         print(f"ctx encoded: {len(ctx_rows)} rows in {time.time() - t0:.0f}s",
@@ -207,7 +209,7 @@ def main(args) -> None:
         lat_rows = pq.read_table(lat_path).to_pylist()
         print(f"latent cache hit: {len(lat_rows)} rows", flush=True)
     else:
-        predictor, config = build_predictor(args, device)
+        predictor = build_predictor(ck, device)
         print("generating latent chains (free-running predictor) ...",
               flush=True)
         t0 = time.time()
@@ -237,13 +239,13 @@ def main(args) -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id, torch_dtype=torch.bfloat16,
+        attn_implementation="sdpa",
     ).to(device)
     model.eval()
     embed_fn = model.get_input_embeddings()
     H = model.config.hidden_size
 
-    pcfg = yaml.safe_load(open(args.predictor_config))
-    E = pcfg["encoder_hidden_size"]
+    E = config["encoder_hidden_size"]
     proj = nn.Linear(E, H, dtype=torch.bfloat16).to(device)
     proj_ck = torch.load(args.projection_checkpoint, map_location="cpu",
                          weights_only=False)["projection"]

@@ -85,6 +85,7 @@ def main(args) -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id, torch_dtype=torch.bfloat16,
+        attn_implementation="sdpa",
     ).to(device)
     model.eval()
 
