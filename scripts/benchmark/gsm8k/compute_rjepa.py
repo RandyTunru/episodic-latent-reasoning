@@ -92,6 +92,17 @@ def parse_args() -> argparse.Namespace:
                         "reasoning)")
     p.add_argument("--limit", type=int, default=None,
                    help="debug: evaluate only the first N questions")
+    p.add_argument("--latent-source", type=str, default="predictor",
+                   choices=["predictor", "targets"],
+                   help="predictor = generated latents (the rjepa row); "
+                        "targets = ground-truth latents read from a "
+                        "precomputed targets parquet (the GT-latents "
+                        "oracle row)")
+    p.add_argument("--targets-dir", type=str, default=None,
+                   help="precomputed targets dir for --latent-source "
+                        "targets (part-*.parquet with sample_index/"
+                        "num_steps/step_targets; sample_index must equal "
+                        "the question index)")
     p.add_argument("--no-cache", action="store_true",
                    help="ignore cached ctx/latent stages and recompute")
     p.add_argument("--run-name", type=str, default=None,
@@ -189,51 +200,85 @@ def main(args) -> None:
     print(f"{len(questions)} questions (source: {source}), "
           f"output -> {out_dir}", flush=True)
 
-    # ---- stage 1: ctx encoding (cached) ----
-    ctx_path = ctx_cache_path()
-    if ctx_path.exists() and not args.no_cache:
-        ctx_rows = pq.read_table(ctx_path).to_pylist()
-        print(f"ctx cache hit: {len(ctx_rows)} rows", flush=True)
-    else:
-        print("encoding ctx with frozen Qwen3-4B ...", flush=True)
-        t0 = time.time()
-        ctx_rows = encode_ctxs(config, questions, device)
-        pq.write_table(pa.Table.from_pylist(ctx_rows, schema=CTX_SCHEMA),
-                       ctx_path, row_group_size=64)
-        print(f"ctx encoded: {len(ctx_rows)} rows in {time.time() - t0:.0f}s",
-              flush=True)
-
-    # ---- stage 2: latent generation (cached by checkpoint) ----
-    lat_path = latent_cache_path(args.predictor_checkpoint)
-    if lat_path.exists() and not args.no_cache:
-        lat_rows = pq.read_table(lat_path).to_pylist()
-        print(f"latent cache hit: {len(lat_rows)} rows", flush=True)
-    else:
-        predictor = build_predictor(ck, device)
-        print("generating latent chains (free-running predictor) ...",
-              flush=True)
-        t0 = time.time()
+    # ---- stages 1+2: predictor path (ctx + generated latents), or the
+    # GT-latents oracle path (read precomputed targets directly) ----
+    if args.latent_source == "targets":
+        # ---- GT-latents oracle path: read precomputed targets directly.
+        # sample_index in the precompute equals the HF row index, which is
+        # the question index here (same split, same order). ----
+        if not args.targets_dir:
+            raise ValueError("--targets-dir is required with "
+                             "--latent-source targets")
+        import glob
+        tgt_files = sorted(
+            glob.glob(str(Path(args.targets_dir) / "part-*.parquet")))
+        if not tgt_files:
+            raise FileNotFoundError(
+                f"no part-*.parquet under {args.targets_dir}")
+        tgt = pq.read_table(tgt_files).to_pandas()
+        by_key = dict(zip(tgt["sample_index"].tolist(),
+                          tgt["step_targets"].tolist()))
+        assert len(by_key) == len(questions), (
+            f"targets rows {len(by_key)} != questions {len(questions)} - "
+            f"sample_index must equal the question index")
         lat_rows = []
-        B = 8
-        for start in range(0, len(questions), B):
-            ctxs = [torch.frombuffer(r["ctx_embeddings"],
-                                     dtype=torch.bfloat16).reshape(
-                -1, config["encoder_hidden_size"])
-                for r in ctx_rows[start:start + B]]
-            chains = generate_batch(predictor, ctxs, device,
-                                    args.halt_threshold, args.max_steps)
-            for i, (blob_lat, _blob_log, halted) in enumerate(chains):
-                lat_rows.append({
-                    "idx": start + i,
-                    "num_steps": len(blob_lat) // (config["encoder_hidden_size"] * 2),
-                    "halted": halted,
-                    "step_latents": blob_lat,
-                })
-        pq.write_table(pa.Table.from_pylist(lat_rows, schema=LATENT_SCHEMA),
-                       lat_path, row_group_size=64)
-        n_halt = sum(r["halted"] for r in lat_rows)
-        print(f"latents generated: {len(lat_rows)} rows "
-              f"({n_halt} halted) in {time.time() - t0:.0f}s", flush=True)
+        for i in range(len(questions)):
+            blob = by_key[i]
+            lat_rows.append({
+                "idx": i,
+                "num_steps": len(blob) // (config["encoder_hidden_size"] * 2),
+                "halted": True,  # GT: the chain is the full true solution
+                "step_latents": blob,
+            })
+        print(f"GT-latents loaded: {len(lat_rows)} rows from "
+              f"{args.targets_dir}", flush=True)
+        ctx_rows = None
+    else:
+        # ---- stage 1: ctx encoding (cached) ----
+        ctx_path = ctx_cache_path()
+        if ctx_path.exists() and not args.no_cache:
+            ctx_rows = pq.read_table(ctx_path).to_pylist()
+            print(f"ctx cache hit: {len(ctx_rows)} rows", flush=True)
+        else:
+            print("encoding ctx with frozen Qwen3-4B ...", flush=True)
+            t0 = time.time()
+            ctx_rows = encode_ctxs(config, questions, device)
+            pq.write_table(pa.Table.from_pylist(ctx_rows, schema=CTX_SCHEMA),
+                           ctx_path, row_group_size=64)
+            print(f"ctx encoded: {len(ctx_rows)} rows in "
+                  f"{time.time() - t0:.0f}s", flush=True)
+
+        # ---- stage 2: latent generation (cached by checkpoint) ----
+        lat_path = latent_cache_path(args.predictor_checkpoint)
+        if lat_path.exists() and not args.no_cache:
+            lat_rows = pq.read_table(lat_path).to_pylist()
+            print(f"latent cache hit: {len(lat_rows)} rows", flush=True)
+        else:
+            predictor = build_predictor(ck, device)
+            print("generating latent chains (free-running predictor) ...",
+                  flush=True)
+            t0 = time.time()
+            lat_rows = []
+            B = 8
+            for start in range(0, len(questions), B):
+                ctxs = [torch.frombuffer(r["ctx_embeddings"],
+                                         dtype=torch.bfloat16).reshape(
+                    -1, config["encoder_hidden_size"])
+                    for r in ctx_rows[start:start + B]]
+                chains = generate_batch(predictor, ctxs, device,
+                                        args.halt_threshold, args.max_steps)
+                for i, (blob_lat, _blob_log, halted) in enumerate(chains):
+                    lat_rows.append({
+                        "idx": start + i,
+                        "num_steps": len(blob_lat) // (config["encoder_hidden_size"] * 2),
+                        "halted": halted,
+                        "step_latents": blob_lat,
+                    })
+            pq.write_table(pa.Table.from_pylist(lat_rows, schema=LATENT_SCHEMA),
+                           lat_path, row_group_size=64)
+            n_halt = sum(r["halted"] for r in lat_rows)
+            print(f"latents generated: {len(lat_rows)} rows "
+                  f"({n_halt} halted) in {time.time() - t0:.0f}s", flush=True)
 
     # ---- stage 3: LLM + projection answer generation ----
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
@@ -346,7 +391,9 @@ def main(args) -> None:
 
     meta = {
         "benchmark": BENCHMARK,
-        "row": "rjepa_zero_shot",
+        "row": ("gt_latents_oracle" if args.latent_source == "targets"
+                else "rjepa_zero_shot"),
+        "latent_source": args.latent_source,
         "model_id": args.model_id,
         "predictor_checkpoint": args.predictor_checkpoint,
         "projection_checkpoint": args.projection_checkpoint,
