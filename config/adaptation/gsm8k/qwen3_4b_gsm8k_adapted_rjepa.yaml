@@ -1,0 +1,60 @@
+project_name: "qwen-3.4b-rjepa-gsm8k-adapted"
+run_name: "gsm8k-adapted-predictor-01"
+
+# Data (GSM8K train split, precomputed with --format gsm8k,
+# --step-separator '\n': each solution line is a step, the trailing
+# "#### N" line is the final (halt) step)
+ctx_dir: "data/benchmark/gsm8k/gsm8k_train_precomputed/ctx/Qwen_Qwen3-4B"
+targets_dir: "data/benchmark/gsm8k/gsm8k_train_precomputed/targets/Qwen_Qwen3-Embedding-4B"
+n_rewrite: 1
+
+# Predictor
+cross_attention: false
+predictor_hidden_size: 1280
+predictor_num_heads: 16
+predictor_d_ff: 4096
+predictor_num_layers: 18
+predictor_max_seq_len: 512
+
+# Router
+router_alpha: 0.2
+router_halt_weight: 3 # GSM8K solutions are ~5-10 lines: halt:continue ~1:7
+
+# Encoder
+encoder_hidden_size: 2560
+encoder_max_seq_len: 2048
+encoder_pooling: "eos"
+
+# Optimization
+batch_size: 8
+gradient_accumulation_steps: 8 # Effective batch size = 64
+learning_rate: 5.0e-5 # adaptation convention: ~10x below pretraining lr
+start_lr: 5.0e-6 # 10% of the base learning rate
+min_lr_ratio: 0.01
+weight_decay: 0.05
+weight_decay_end: 0.05 # flat WD: the 0.05->0.4 ramp was tuned for 275k steps
+max_steps: 585 # 117 steps/epoch; 5 epochs of adaptation (not 50 - overfit at 50)
+warmup_steps: 29 # 5% of max_steps
+
+# Logging
+log_every: 100
+save_every: 117 # every 1 epoch
+
+# Evaluation (held-out split: last `val_per_bucket` rows of each length bucket)
+eval_every: 117 # every 1 epoch
+val_per_bucket: 16
+
+# Directories
+wandb_dir : "logs"
+checkpoint_dir : "artifacts/checkpoints/predictor/gsm8k_adapted_01"
+
+# Warm-start from the MoT-trained predictor (detached-router run);
+# is_resume=false -> fresh optimizer + step 0, weights only
+from_checkpoint: "artifacts/checkpoints/predictor/qwen3_llm_4b_rjepa_openr1_all_rewritten_03/model_step_55000.pt"
+is_resume: false
+
+# Miscellaneous
+num_workers: 16
+prefetch_factor: 4
+no_epochs: false
+seed: 0 # reproducibility: data order / epoch shuffles
