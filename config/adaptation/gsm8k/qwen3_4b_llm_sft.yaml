@@ -1,0 +1,25 @@
+project_name: "qwen-3.4b-llm-gsm8k-sft"
+run_name: "gsm8k-sft-baseline-02"
+
+# Model + data
+model_id: "Qwen/Qwen3-4B"
+dataset_id: "openai/gsm8k"
+split: "train"
+val_fraction: 0.05 # dev slice of train for overfitting monitoring
+
+# Optimization (full fine-tune; the LLM SFT convention: ~2e-5, few epochs)
+batch_size: 2
+gradient_accumulation_steps: 16 # effective 32
+learning_rate: 1.0e-5
+weight_decay: 0.01
+max_steps: 702 # 7473*0.95 : 32 = 222 steps/epoch; 3 epochs
+warmup_steps: 7 # 1% of max_steps
+
+# Logging
+log_every: 20
+eval_every: 111 # every ~0.5 epoch
+save_every: 222 # every 1 epoch
+wandb_dir: "logs"
+checkpoint_dir: "artifacts/checkpoints/llm/gsm8k_sft_02"
+
+seed: 0 # reproducibility
