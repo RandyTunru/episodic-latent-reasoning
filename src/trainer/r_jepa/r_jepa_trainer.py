@@ -140,28 +140,32 @@ class Trainer:
             )
             self.optimizer.step()
 
+            metrics_to_log = {}
+
             # ---- validation ----
-            metrics = {}
             if step % self.eval_every == 0:
-                metrics = self._validate(step, ctx)
+                val_metrics = self._validate(step, ctx)
+                metrics_to_log.update(val_metrics)
 
             # ---- logging ----
             if step % self.config.get("log_every", 50) == 0:
                 tps = self.monitor.get_tps()
-                wandb.log({
-                    **metrics, # log validation metrics here instead of at the end of _validate() to avoid double logging
+                metrics_to_log.update({
                     "train/loss": accum_loss,
                     "train/regression_loss": regression_loss,
                     "train/router_bce": router_bce,
                     "train/learning_rate": lr,
                     "metrics/throughput_tps": tps,
-                    "step": step,
                 })
+
                 print(
                     f"Step {step:06d} | loss={accum_loss:.4f} | "
                     f"reg_loss={regression_loss:.4f} | router_bce={router_bce:.4f} | "
                     f"lr={lr:.2e} | tps={tps:.0f}"
                 )
+
+            if metrics_to_log:
+                wandb.log({**metrics_to_log, "step": step})
 
             # ---- checkpointing ----
             if step > 0 and step % self.config.get("save_every", 5000) == 0:
@@ -173,9 +177,9 @@ class Trainer:
         # that.  The step > start_step guard skips this block when
         # resuming from a completed run, where the loop never executed.
         if step > self.start_step and step % self.eval_every != 0:
-            metrics = self._validate(step, ctx)
+            val_metrics = self._validate(step, ctx)
             wandb.log({
-                **metrics,
+                **val_metrics,
                 "train/loss": accum_loss,
                 "train/regression_loss": regression_loss,
                 "train/router_bce": router_bce,
