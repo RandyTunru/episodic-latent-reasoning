@@ -190,6 +190,9 @@ def parse_args() -> argparse.Namespace:
         "--branch", required=True, choices=sorted(SCHEMAS),
         help="which side of the R-JEPA input contract to produce",
     )
+    parser.add_argument("--format", default=None,
+                        help="row-format adapter for non-MoT datasets "
+                        "(currently: gsm8k)")
     parser.add_argument("--dataset-id", default="open-r1/Mixture-of-Thoughts")
     parser.add_argument("--subset", default="science")
     parser.add_argument("--split", default="train")
@@ -319,6 +322,15 @@ def main(args) -> None:
         data = load_dataset(args.dataset_id, args.subset, split=args.split)
         if args.max_samples is not None:
             data = data.select(range(min(args.max_samples, len(data))))
+        if args.format == "gsm8k":
+            # GSM8K rows are {question, answer} - wrap into the messages
+            # convention the dataset classes expect (instruction/response).
+            # The answer column holds the step-by-step solution; with
+            # --step-separator '\n' each line becomes a step and the
+            # trailing "#### N" line becomes the final (halt) step.
+            data = [{"messages": [{"content": r["question"]},
+                                  {"content": r["answer"]}]}
+                    for r in data]
 
         dataset = ReasoningDataset(
             data,

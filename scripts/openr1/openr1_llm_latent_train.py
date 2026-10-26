@@ -73,14 +73,6 @@ class LatentAnswerDataset(Dataset):
         self.mode = mode
         self.hidden_size = hidden_size
 
-        rewrite_parts = sorted(
-            str(p) for p in Path(config["rewrite_dir"]).glob("part-*.parquet")
-        )
-        rw = pq.read_table(
-            rewrite_parts, columns=["orig_row_id", "cot_variant", "messages",
-                                    "cot_text"],
-        ).to_pandas()
-
         lat_by_key = {}
         if mode == "latents":
             lat_parts = sorted(
@@ -91,6 +83,43 @@ class LatentAnswerDataset(Dataset):
             ).to_pandas()
             lat_by_key = dict(zip(lat["sample_index"].tolist(),
                                   lat["step_latents"].tolist()))
+
+        if config.get("data_format") == "gsm8k":
+            # GSM8K rows: {question, answer} from HF, joined with the
+            # latent precompute on sample_index == row index.  The answer
+            # IS the full step-by-step solution (ends "#### N") - the
+            # same text the LLM must generate at eval.
+            from datasets import load_dataset as _load_ds
+            gsm = _load_ds(config.get("dataset_id", "openai/gsm8k"), "main",
+                           split=config.get("split", "train"))
+            self.rows = []
+            skipped = 0
+            for i, ex in enumerate(gsm):
+                if keep is not None and i not in keep:
+                    continue
+                latents = None
+                if mode == "latents":
+                    blob = lat_by_key.get(i)
+                    if blob is None:
+                        skipped += 1
+                        continue
+                    latents = torch.frombuffer(
+                        blob, dtype=torch.bfloat16,
+                    ).reshape(-1, hidden_size).float()
+                self.rows.append((ex["question"], ex["answer"], "", latents))
+            print(
+                f"LatentAnswerDataset (gsm8k): {len(self.rows)} rows "
+                f"(mode={mode}, skipped {skipped})", flush=True,
+            )
+            return
+
+        rewrite_parts = sorted(
+            str(p) for p in Path(config["rewrite_dir"]).glob("part-*.parquet")
+        )
+        rw = pq.read_table(
+            rewrite_parts, columns=["orig_row_id", "cot_variant", "messages",
+                                    "cot_text"],
+        ).to_pandas()
 
         self.rows = []
         skipped = 0
@@ -249,7 +278,7 @@ def main(config_path: str) -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(config["model_id"])
     model = AutoModelForCausalLM.from_pretrained(
-        config["model_id"], dtype=torch.bfloat16,
+        config["model_id"], dtype=torch.bfloat16, attn_implementation="sdpa"
     ).to(device)
     for p in model.parameters():
         p.requires_grad = False
@@ -261,6 +290,12 @@ def main(config_path: str) -> None:
     proj = nn.Linear(
         config["encoder_hidden_size"], model.config.hidden_size,
     ).to(device)
+    if config.get("from_checkpoint"):
+        ck = torch.load(config["from_checkpoint"], map_location="cpu",
+                        weights_only=False)
+        proj.load_state_dict(ck["projection"])
+        print(f"projection warm-started from {config['from_checkpoint']}",
+              flush=True)
 
     # ---- the predictor's exact train/val split, mapped to sample_index ----
     pds = PrecomputedReasoningDataset(
