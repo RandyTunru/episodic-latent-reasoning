@@ -1,0 +1,45 @@
+project_name: "qwen-3.4b-llm-latent-gsm8k-adapted"
+run_name: "gsm8k-adapted-projection-01"
+
+# Model + data
+model_id: "Qwen/Qwen3-4B"
+data_format: "gsm8k"          # {question, answer} rows joined on sample_index == row index
+dataset_id: "openai/gsm8k"
+split: "train"
+latents_dir: "data/benchmark/gsm8k/gsm8k_train_precomputed/latents/detached_step00468"
+ctx_dir: "data/benchmark/gsm8k/gsm8k_train_precomputed/ctx/Qwen_Qwen3-4B"
+targets_dir: "data/benchmark/gsm8k/gsm8k_train_precomputed/targets/Qwen_Qwen3-Embedding-4B"
+n_rewrite: 1
+
+# Input condition: latents | cot | none
+mode: "latents"
+
+# Token budgets
+max_ctx_tokens: 512
+max_answer_tokens: 2048 # full solutions; unended truncation for the rare longer rows
+max_latent_steps: 128
+max_cot_tokens: 1024
+
+# Predictor-side references (for the shared val split)
+encoder_hidden_size: 2560
+predictor_max_seq_len: 512
+encoder_max_seq_len: 2048
+val_per_bucket: 16
+
+# Warm-start from the MoT-trained projection (think-block retrain).
+# Adaptation convention: ~10x below its 1e-3 pretraining lr, few epochs.
+from_checkpoint: "artifacts/checkpoints/projector/llm_latent_pilot_01/projection_step_005000.pt"
+
+# Optimization (projection only, LLM frozen)
+batch_size: 4
+gradient_accumulation_steps: 8 # effective 32
+learning_rate: 1.0e-4
+weight_decay: 0.01
+max_steps: 1170 # 7473 rows : 32 = 234 steps/epoch; 5 epochs
+
+# Logging
+log_every: 50
+save_every: 234 # every 1 epoch
+wandb_dir: "logs"
+checkpoint_dir: "artifacts/checkpoints/projector/gsm8k_adapted_01"
+seed: 0 # reproducibility: data order / epoch shuffles
